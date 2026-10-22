@@ -52,7 +52,7 @@ docs/
 7. **Cautious wording** in findings: "possible conflict", "potential test gap". Never say a release is safe.
 8. Write pytest tests for: connectors' parsers (with fixture files), validation rules, drift rules, risk rules. Do not call real external APIs in tests — use fixtures/mocks.
 9. Small commits with clear messages. After finishing a task, run `pytest` (backend) and `npm run lint && npm run build` (frontend) before saying it is done.
-10. English only for messages in this version. Python only for analysed repositories.
+10. 10. Client messages may be in English, Bangla (Bengali script) or Banglish (Bangla written in Latin letters), often mixed in one message. Store message text exactly as received. Extracted requirements are written in English, and each keeps the original source sentence unchanged. Analysed repositories: Python only.
 
 ## Commands
 - Backend: `cd backend && uvicorn app.main:app --reload` · tests: `cd backend && pytest -q` · migrations: `alembic revision --autogenerate -m "..." && alembic upgrade head`
