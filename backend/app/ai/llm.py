@@ -80,7 +80,8 @@ class GeminiProvider:
     """Google Gemini through its REST API (generateContent). The key is sent in a header, never in the URL.
 
     HTTP 503 (overloaded) and 429 (rate limit) are retried up to 3 times after 2, 4 and 8 seconds, or after
-    the Retry-After header when Gemini sends one. Other errors fail at once. `thinking` is sent as
+    the delay Gemini asks for (Retry-After header or RetryInfo.retryDelay in the body). A 429 for the daily
+    quota (or a delay over MAX_WAIT_SECONDS) fails at once. Other errors fail at once. `thinking` is sent as
     generationConfig.thinkingConfig.thinkingLevel.
     """
 
@@ -131,9 +132,15 @@ class GeminiProvider:
                 raise LLMError("Could not reach Gemini. Check the internet connection and settings.") from None
             self._log_attempt(retries + 1, response.status_code, started)
 
-            if response.status_code not in RETRY_STATUSES or retries == len(BACKOFF_SECONDS):
+            if response.status_code not in RETRY_STATUSES:
                 return response
-            wait = retry_wait(response, retries)
+            delay = retry_delay(response)
+            if response.status_code == 429 and (is_daily_quota(response) or (delay or 0) > MAX_WAIT_SECONDS):
+                logger.warning("llm provider=gemini daily quota used up, retry_delay_s=%s; not retrying", delay)
+                raise LLMError(daily_quota_message(delay))
+            if retries == len(BACKOFF_SECONDS):
+                return response
+            wait = BACKOFF_SECONDS[retries] if delay is None else delay
             if wait > MAX_WAIT_SECONDS:
                 return response
             if deadline is not None and now() + wait + MIN_ATTEMPT_SECONDS > deadline:
@@ -180,16 +187,59 @@ class GeminiProvider:
         return LLMResponse(text=text, input_tokens=usage.get("promptTokenCount"), output_tokens=output)
 
 
-def retry_wait(response: httpx.Response, attempt: int) -> float:
-    """Seconds before the next try: the Retry-After header (in seconds) if usable, else the backoff."""
-    header = response.headers.get("Retry-After", "").strip()
+_RETRY_DELAY = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$")
+
+
+def _error(response: httpx.Response) -> dict:
+    """The "error" object of a Gemini error body, or {} when the body is not that."""
     try:
-        seconds = float(header)
+        data = response.json()
+    except ValueError:
+        return {}
+    error = data.get("error") if isinstance(data, dict) else None
+    return error if isinstance(error, dict) else {}
+
+
+def _details(response: httpx.Response) -> list[dict]:
+    return [d for d in (_error(response).get("details") or []) if isinstance(d, dict)]
+
+
+def retry_delay(response: httpx.Response) -> float | None:
+    """Seconds Gemini asks us to wait: the Retry-After header, else error.details RetryInfo.retryDelay
+    (e.g. "44953s"). None when neither is given or usable."""
+    try:
+        seconds = float(response.headers.get("Retry-After", "").strip())
         if seconds >= 0:
             return seconds
     except ValueError:
         pass
-    return BACKOFF_SECONDS[attempt]
+    for detail in _details(response):
+        if str(detail.get("@type", "")).endswith("google.rpc.RetryInfo"):
+            match = _RETRY_DELAY.match(str(detail.get("retryDelay", "")))
+            if match:
+                return float(match.group(1))
+    return None
+
+
+def is_daily_quota(response: httpx.Response) -> bool:
+    """True when the 429 says a per-day quota was exceeded (in the message or a QuotaFailure quotaId)."""
+    message = str(_error(response).get("message", "")).lower()
+    if "per day" in message or "perday" in message:
+        return True
+    return any(
+        "perday" in str(violation.get("quotaId", "")).lower()
+        for detail in _details(response)
+        if str(detail.get("@type", "")).endswith("google.rpc.QuotaFailure")
+        for violation in (detail.get("violations") or [])
+        if isinstance(violation, dict)
+    )
+
+
+def daily_quota_message(delay: float | None) -> str:
+    if delay is None:
+        return "Gemini daily free quota used up. Try again tomorrow."
+    hours = max(1, round(delay / 3600))
+    return f"Gemini daily free quota used up. Try again in about {hours} hour{'' if hours == 1 else 's'}."
 
 
 PROVIDERS: dict[str, type] = {"gemini": GeminiProvider}

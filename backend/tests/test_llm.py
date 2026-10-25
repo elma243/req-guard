@@ -379,14 +379,78 @@ def test_gemini_unusable_retry_after_falls_back_to_backoff(waits):
 
 
 @respx.mock
-def test_gemini_too_long_retry_after_is_not_waited_for(waits):
-    limited = httpx.Response(429, headers={"Retry-After": "3600"}, json={"error": {"message": "Daily quota."}})
-    route = respx.post(GEMINI_URL).mock(side_effect=[limited, ok()])
+def test_gemini_daily_quota_fails_at_once(waits, caplog):
+    body = gemini_fixture("gemini_daily_quota.json")  # no Retry-After header; RetryInfo.retryDelay "44953s"
+    route = respx.post(GEMINI_URL).mock(side_effect=[httpx.Response(429, json=body), ok()])
 
-    with pytest.raises(LLMError, match=r"rate limit reached \(HTTP 429\): Daily quota"):
+    with caplog.at_level(logging.INFO, logger="app.ai.llm"), pytest.raises(LLMError) as exc:
         GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x")
+
+    assert str(exc.value) == "Gemini daily free quota used up. Try again in about 12 hours."
     assert route.call_count == 1
     assert waits == []
+    assert "not retrying" in caplog.text and FAKE_KEY not in caplog.text
+
+
+def _quota_429(message: str, retry_delay: str | None = None, quota_id: str | None = None, **headers):
+    details = []
+    if quota_id:
+        details.append({"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": quota_id}]})
+    if retry_delay:
+        details.append({"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay})
+    body = {"error": {"code": 429, "message": message, "status": "RESOURCE_EXHAUSTED", "details": details}}
+    return httpx.Response(429, headers=headers, json=body)
+
+
+@respx.mock
+def test_gemini_retry_delay_over_60s_in_body_fails_at_once(waits):
+    route = respx.post(GEMINI_URL).mock(side_effect=[_quota_429("Quota exceeded.", "7200s"), ok()])
+
+    with pytest.raises(LLMError, match=r"^Gemini daily free quota used up\. Try again in about 2 hours\.$"):
+        GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x")
+    assert (route.call_count, waits) == (1, [])
+
+
+@respx.mock
+def test_gemini_too_long_retry_after_header_fails_at_once(waits):
+    route = respx.post(GEMINI_URL).mock(side_effect=[_quota_429("Quota exceeded.", **{"Retry-After": "3600"}), ok()])
+
+    with pytest.raises(LLMError, match=r"about 1 hour\.$"):
+        GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x")
+    assert (route.call_count, waits) == (1, [])
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        _quota_429("Quota exceeded for quota metric 'Generate requests' and limit 'requests per day'."),
+        _quota_429("Quota exceeded.", quota_id="GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+    ],
+)
+def test_gemini_per_day_quota_without_delay_fails_at_once(waits, response):
+    route = respx.post(GEMINI_URL).mock(side_effect=[response, ok()])
+
+    with pytest.raises(LLMError, match=r"^Gemini daily free quota used up\. Try again tomorrow\.$"):
+        GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x")
+    assert (route.call_count, waits) == (1, [])
+
+
+@respx.mock
+def test_gemini_short_retry_delay_in_body_is_waited_for(waits):
+    per_minute = _quota_429("Quota exceeded per minute.", "17s", quota_id="GenerateRequestsPerMinutePerProjectPerModel")
+    respx.post(GEMINI_URL).mock(side_effect=[per_minute, ok()])
+
+    assert GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x").input_tokens == 120
+    assert waits == [17.0]
+
+
+@pytest.mark.parametrize(
+    "seconds, text",
+    [(None, "Try again tomorrow."), (61, "about 1 hour."), (5400, "about 2 hours."), (44953, "about 12 hours.")],
+)
+def test_daily_quota_message(seconds, text):
+    assert llm.daily_quota_message(seconds).endswith(text)
 
 
 @respx.mock
