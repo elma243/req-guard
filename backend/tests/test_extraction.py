@@ -190,6 +190,7 @@ def test_run_stores_exact_sentences_and_marks_all_processed(db, project):
     first = reqs[0]
     assert [(s.message_id, s.source_sentence) for s in first.sources] == [(otp.id, BANGLA_OTP)]
     assert (first.current.version, first.current.origin, first.current.nfr_category) == (1, "ai", "security")
+    assert all(r.current.ai_model == "fake-model" for r in reqs)
     assert reqs[1].sources[0].source_sentence == BANGLISH_PDF
     assert reqs[1].current.nfr_category is None
     assert all(m.requirements_extracted_at for m in (otp, small, csv))
@@ -243,6 +244,50 @@ def test_llm_error_keeps_finished_batches(db, project, monkeypatch):
 
     again = extract_requirements(db, project, FakeLLM())
     assert (again.messages_processed, again.requirements_created, again.error) == (1, 2, None)
+
+
+class _Busy:
+    name, model = "gemini", "main-model"
+
+    def generate(self, prompt, **options):
+        raise llm_module.LLMUnavailableError("Gemini is overloaded (HTTP 503). Try again in a few minutes.")
+
+
+class _Answers:
+    name, model = "gemini", "fallback-model"
+
+    def __init__(self, answer: str | None):
+        self.answer = answer
+
+    def generate(self, prompt, **options):
+        if self.answer is None:
+            raise llm_module.LLMUnavailableError("Gemini daily free quota used up. Try again tomorrow.")
+        return llm_module.LLMResponse(text=self.answer)
+
+
+def test_requirements_store_the_fallback_model_that_answered(db, project):
+    (message,) = add_messages(db, project, "Admin should be able to export all orders as CSV.")
+    answer = (
+        '{"requirements": [{"statement": "The system shall export orders as CSV.", "type": "functional", '
+        f'"sentence_ids": ["m{message.id}.s1"], "confidence": 0.9}}]}}'
+    )
+    llm = llm_module.LLMClient(_Busy(), _Answers(answer))
+
+    result = extract_requirements(db, project, llm)
+
+    assert (result.requirements_created, result.error) == (1, None)
+    assert db.query(Requirement).one().current.ai_model == "fallback-model"
+
+
+def test_both_models_unavailable_is_the_run_error(db, project):
+    (message,) = add_messages(db, project, "Admin should be able to export all orders as CSV.")
+
+    result = extract_requirements(db, project, llm_module.LLMClient(_Busy(), _Answers(None)))
+
+    assert result.error == "Both Gemini models are busy or out of free quota. Try again later."
+    assert (result.requirements_created, result.messages_remaining) == (0, 1)
+    db.refresh(message)
+    assert message.requirements_extracted_at is None
 
 
 def test_llm_gets_thinking_level_and_run_deadline(db, project, monkeypatch):

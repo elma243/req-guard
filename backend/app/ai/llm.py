@@ -6,6 +6,10 @@
 - Providers only turn a prompt into text. Add a new provider as one more class in `PROVIDERS`.
 - Optional per call: `thinking` (a reasoning level hint, e.g. "low") and `deadline` (a `clock()` time by
   which the call must end; HTTP attempts and retries are cut to fit, so a request has a known maximum).
+- Fallback model (LLM_FALLBACK_MODEL, optional): when the main model is unavailable (overloaded or rate
+  limited after its retries, timed out, or daily quota used up), the same request is sent once to the
+  fallback model. The client then stays on the fallback for the rest of its calls (one extraction run), so
+  later batches do not wait for the busy main model again. `last_model` is the model that answered.
 - Logged per HTTP attempt and per call: provider, model, attempt, status, tokens and elapsed time.
   Never the API key, and never the prompt or answer text (it contains client messages).
 """
@@ -62,6 +66,14 @@ class LLMNotConfiguredError(LLMError):
     """LLM_PROVIDER, LLM_MODEL or LLM_API_KEY is missing or unsupported."""
 
 
+class LLMUnavailableError(LLMError):
+    """The model is busy (503 / 429 after retries), timed out, or its daily quota is used up.
+    Another model may still answer, so the fallback model is tried."""
+
+
+BOTH_UNAVAILABLE = "Both Gemini models are busy or out of free quota. Try again later."
+
+
 @dataclass
 class LLMResponse:
     text: str
@@ -82,16 +94,24 @@ class GeminiProvider:
     HTTP 503 (overloaded) and 429 (rate limit) are retried up to 3 times after 2, 4 and 8 seconds, or after
     the delay Gemini asks for (Retry-After header or RetryInfo.retryDelay in the body). A 429 for the daily
     quota (or a delay over MAX_WAIT_SECONDS) fails at once. Other errors fail at once. `thinking` is sent as
-    generationConfig.thinkingConfig.thinkingLevel.
+    generationConfig.thinkingConfig.thinkingLevel. `max_retries=0` sends each request only once (fallback).
     """
 
     name: ClassVar[str] = "gemini"
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-    def __init__(self, model: str, api_key: str, client: httpx.Client | None = None, timeout: float = 120.0):
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        client: httpx.Client | None = None,
+        timeout: float = 120.0,
+        max_retries: int = len(BACKOFF_SECONDS),
+    ):
         self.model = model
         self._api_key = api_key
         self.timeout = timeout
+        self.max_retries = min(max_retries, len(BACKOFF_SECONDS))
         self.client = client or httpx.Client()
 
     def _safe(self, text: str) -> str:
@@ -107,7 +127,7 @@ class GeminiProvider:
         )
 
     def _post(self, body: dict, deadline: float | None) -> httpx.Response:
-        """POST with retries on 429/503: up to len(BACKOFF_SECONDS) times, waiting Retry-After or the backoff.
+        """POST with retries on 429/503: up to `max_retries` times, waiting Retry-After or the backoff.
 
         Each attempt waits at most `self.timeout` seconds, and never past the deadline.
         """
@@ -126,7 +146,9 @@ class GeminiProvider:
                 )
             except httpx.TimeoutException:
                 self._log_attempt(retries + 1, "timeout", started)
-                raise LLMError(f"Gemini did not answer within {timeout:.0f} seconds. Try again later.") from None
+                raise LLMUnavailableError(
+                    f"Gemini did not answer within {timeout:.0f} seconds. Try again later."
+                ) from None
             except httpx.HTTPError:
                 self._log_attempt(retries + 1, "network_error", started)
                 raise LLMError("Could not reach Gemini. Check the internet connection and settings.") from None
@@ -136,9 +158,11 @@ class GeminiProvider:
                 return response
             delay = retry_delay(response)
             if response.status_code == 429 and (is_daily_quota(response) or (delay or 0) > MAX_WAIT_SECONDS):
-                logger.warning("llm provider=gemini daily quota used up, retry_delay_s=%s; not retrying", delay)
-                raise LLMError(daily_quota_message(delay))
-            if retries == len(BACKOFF_SECONDS):
+                logger.warning(
+                    "llm provider=gemini model=%s daily quota used up, retry_delay_s=%s; not retrying", self.model, delay
+                )
+                raise LLMUnavailableError(daily_quota_message(delay))
+            if retries == self.max_retries:
                 return response
             wait = BACKOFF_SECONDS[retries] if delay is None else delay
             if wait > MAX_WAIT_SECONDS:
@@ -146,7 +170,13 @@ class GeminiProvider:
             if deadline is not None and now() + wait + MIN_ATTEMPT_SECONDS > deadline:
                 return response  # no time left for another attempt
             retries += 1
-            logger.warning("llm provider=gemini status=%d retry=%d wait_s=%.1f", response.status_code, retries, wait)
+            logger.warning(
+                "llm provider=gemini model=%s status=%d retry=%d wait_s=%.1f",
+                self.model,
+                response.status_code,
+                retries,
+                wait,
+            )
             sleep(wait)
 
     def generate(self, prompt: str, *, thinking: str | None = None, deadline: float | None = None) -> LLMResponse:
@@ -166,7 +196,9 @@ class GeminiProvider:
             hint = f": {detail}" if detail else ""
             if status in RETRY_STATUSES:
                 problem = "is overloaded" if status == 503 else "rate limit reached"
-                raise LLMError(self._safe(f"Gemini {problem} (HTTP {status}){hint}. Try again in a few minutes."))
+                raise LLMUnavailableError(
+                    self._safe(f"Gemini {problem} (HTTP {status}){hint}. Try again in a few minutes.")
+                )
             raise LLMError(self._safe(f"Gemini returned an error (HTTP {status}){hint}"))
         if not isinstance(data, dict):
             raise LLMError("Gemini returned a response that is not JSON.")
@@ -311,10 +343,19 @@ RETRY_NOTE = (
 
 
 class LLMClient:
-    """Asks a provider for JSON and validates it. Tests replace this with a fake."""
+    """Asks a provider for JSON and validates it. Tests replace this with a fake.
 
-    def __init__(self, provider: LLMProvider):
+    With a `fallback` provider, a call the main provider cannot serve (LLMUnavailableError) is sent once to
+    the fallback, and later calls of this client go straight to the fallback.
+    """
+
+    # The model that gave the last valid answer, e.g. to store it with extracted requirements
+    last_model: str | None = None
+
+    def __init__(self, provider: LLMProvider, fallback: LLMProvider | None = None):
         self.provider = provider
+        self.fallback = fallback
+        self._main_unavailable = False
 
     def complete_json(
         self,
@@ -330,38 +371,76 @@ class LLMClient:
         for attempt in (1, 2):
             if attempt == 2 and deadline is not None and now() + MIN_ATTEMPT_SECONDS > deadline:
                 raise LLMError("The AI returned an invalid answer and there was no time left to ask again. Try again.")
-            response = self._call(prompt_name, attempt_prompt, attempt, thinking, deadline)
+            response, model = self._generate(prompt_name, attempt_prompt, attempt, thinking, deadline)
             try:
-                return parse_answer(response.text, schema)
+                answer = parse_answer(response.text, schema)
+                self.last_model = model
+                return answer
             except InvalidAnswer as exc:
                 logger.warning("llm invalid answer prompt=%s attempt=%d: %s", prompt_name, attempt, exc)
                 attempt_prompt = prompt + RETRY_NOTE.format(reason=exc)
         raise LLMError("The AI returned an invalid answer twice. Try again; if it keeps failing, try another model.")
 
-    def _call(
+    def _generate(
         self, prompt_name: str, prompt: str, attempt: int, thinking: str | None, deadline: float | None
+    ) -> tuple[LLMResponse, str]:
+        """The answer and the model that gave it: the main model, or the fallback when the main is unavailable."""
+        call = (prompt_name, prompt, attempt, thinking, deadline)
+        if self.fallback is None:
+            return self._call(self.provider, "main", *call), self.provider.model
+        if not self._main_unavailable:
+            try:
+                return self._call(self.provider, "main", *call), self.provider.model
+            except LLMUnavailableError as exc:
+                self._main_unavailable = True
+                logger.warning(
+                    "llm main model=%s unavailable (%s); sending the request to fallback model=%s",
+                    self.provider.model,
+                    exc,
+                    self.fallback.model,
+                )
+        try:
+            return self._call(self.fallback, "fallback", *call), self.fallback.model
+        except LLMUnavailableError:
+            raise LLMUnavailableError(BOTH_UNAVAILABLE) from None
+        except LLMError as exc:
+            raise LLMError(
+                f"{self.provider.model} is unavailable and the fallback model {self.fallback.model} failed: {exc}"
+            ) from None
+
+    def _call(
+        self,
+        provider: LLMProvider,
+        role: str,
+        prompt_name: str,
+        prompt: str,
+        attempt: int,
+        thinking: str | None,
+        deadline: float | None,
     ) -> LLMResponse:
-        """One call to the provider (its HTTP retries included), logged with the elapsed time."""
+        """One call to a provider (its HTTP retries included), logged with the model and the elapsed time."""
         started = time.perf_counter()
         try:
-            response = self.provider.generate(prompt, thinking=thinking, deadline=deadline)
+            response = provider.generate(prompt, thinking=thinking, deadline=deadline)
         except LLMError:
             logger.warning(
-                "llm call failed prompt=%s provider=%s model=%s attempt=%d thinking=%s elapsed_ms=%d",
+                "llm call failed prompt=%s provider=%s model=%s role=%s attempt=%d thinking=%s elapsed_ms=%d",
                 prompt_name,
-                self.provider.name,
-                self.provider.model,
+                provider.name,
+                provider.model,
+                role,
                 attempt,
                 thinking or "default",
                 (time.perf_counter() - started) * 1000,
             )
             raise
         logger.info(
-            "llm call prompt=%s provider=%s model=%s attempt=%d thinking=%s input_tokens=%s output_tokens=%s "
-            "elapsed_ms=%d",
+            "llm call prompt=%s provider=%s model=%s role=%s attempt=%d thinking=%s input_tokens=%s "
+            "output_tokens=%s elapsed_ms=%d",
             prompt_name,
-            self.provider.name,
-            self.provider.model,
+            provider.name,
+            provider.model,
+            role,
             attempt,
             thinking or "default",
             response.input_tokens,
@@ -390,13 +469,15 @@ def get_llm() -> LLMClient:
         raise LLMNotConfiguredError(
             f"LLM_PROVIDER '{provider_name}' is not supported. Supported: {', '.join(sorted(PROVIDERS))}."
         )
-    return LLMClient(
-        provider_cls(
-            model=settings.llm_model.strip(),
-            api_key=settings.llm_api_key.strip(),
-            timeout=settings.llm_timeout_seconds,
-        )
-    )
+    model = settings.llm_model.strip()
+    api_key = settings.llm_api_key.strip()
+    timeout = settings.llm_timeout_seconds
+    fallback_model = (settings.llm_fallback_model or "").strip()
+    fallback = None
+    if fallback_model and fallback_model != model:
+        # Sent once only: the main model already spent its retries
+        fallback = provider_cls(model=fallback_model, api_key=api_key, timeout=timeout, max_retries=0)
+    return LLMClient(provider_cls(model=model, api_key=api_key, timeout=timeout), fallback)
 
 
 def complete_json(prompt_name: str, variables: dict[str, Any], schema: type[T], **options: Any) -> T:

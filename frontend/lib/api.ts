@@ -292,6 +292,7 @@ export type RequirementVersion = {
   nfr_category: NfrCategory | null;
   actor: string;
   confidence: number | null; // AI confidence 0-1; null for versions written by a user
+  ai_model: string | null; // LLM model that wrote this version; null for versions written by a user
   origin: "ai" | "user";
   created_by_id: number | null;
   created_at: string;

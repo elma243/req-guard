@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
+    # Model asked once when LLM_MODEL is overloaded, times out or is out of daily quota (empty: no fallback)
+    llm_fallback_model: str | None = None
     # Seconds to wait for one LLM HTTP response (thinking models can be slow when the service is busy)
     llm_timeout_seconds: float = 120.0
     # Gemini thinking level for requirement extraction: minimal | low | medium | high, or "default" to send

@@ -12,12 +12,14 @@ class FakeLLM(LLMClient):
     """For every sentence that contains a `match` text of the table, returns that entry's requirements.
 
     `fail_on_call=n` raises LLMError on the n-th call (1-based); `extra` items are added to every answer.
+    Each answer is reported as given by `model` (`last_model`).
     """
 
-    def __init__(self, fail_on_call: int | None = None, extra: list[dict] | None = None):
+    def __init__(self, fail_on_call: int | None = None, extra: list[dict] | None = None, model: str = "fake-model"):
         self.table = json.loads(ANSWERS.read_text(encoding="utf-8"))
         self.fail_on_call = fail_on_call
         self.extra = extra or []
+        self.model = model
         self.calls: list[dict] = []
         self.options: list[dict] = []  # thinking / deadline of each call
 
@@ -33,6 +35,7 @@ class FakeLLM(LLMClient):
                 for entry in self.table:
                     if entry["match"] in sentence["text"]:
                         found += [{**r, "sentence_ids": [sentence["id"]]} for r in entry["requirements"]]
+        self.last_model = self.model
         return schema.model_validate({"requirements": found + self.extra})
 
     @property

@@ -72,7 +72,7 @@ function RequirementsView({ projectId }: { projectId: string }) {
               <th className="w-24 px-4 py-3 font-medium">Code</th>
               <th className="px-4 py-3 font-medium">Requirement and source</th>
               <th className="w-40 px-4 py-3 font-medium">Type</th>
-              <th className="w-28 px-4 py-3 font-medium">Confidence</th>
+              <th className="w-36 px-4 py-3 font-medium">Confidence</th>
               <th className="w-32 px-4 py-3 font-medium">Status</th>
             </tr>
           </thead>
@@ -142,6 +142,7 @@ function RequirementRow({ requirement: r }: { requirement: Requirement }) {
       </td>
       <td className="px-4 py-3 text-zinc-300 tabular-nums">
         {v.confidence === null ? <span className="text-zinc-600">—</span> : `${Math.round(v.confidence * 100)}%`}
+        {v.ai_model && <p className="mt-0.5 break-all text-xs text-zinc-500">{v.ai_model}</p>}
       </td>
       <td className="px-4 py-3">
         <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${STATUS_STYLE[r.status]}`}>

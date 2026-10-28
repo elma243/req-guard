@@ -252,7 +252,7 @@ def _next_numbers(db: Session, project_id: int, count: int) -> range:
     return range(last + 1, last + count + 1)
 
 
-def _store(db: Session, project_id: int, found: list[_Found]) -> int:
+def _store(db: Session, project_id: int, found: list[_Found], ai_model: str | None = None) -> int:
     message_ids = {mid for f in found for mid, _ in f.sources}
     kept = _kept_sources(db, project_id, message_ids) if message_ids else Counter()
     new: list[_Found] = []
@@ -282,6 +282,7 @@ def _store(db: Session, project_id: int, found: list[_Found]) -> int:
                         nfr_category=item.nfr_category,
                         actor=item.actor,
                         confidence=item.confidence,
+                        ai_model=ai_model,
                         origin="ai",
                     )
                 ],
@@ -364,7 +365,8 @@ def extract_requirements(
             result.error = str(exc)
             break
         _delete_replaceable(db, project.id, {item.message.id for item in batch})
-        result.requirements_created += _store(db, project.id, resolve_sentences(answer, sentences))
+        found = resolve_sentences(answer, sentences)
+        result.requirements_created += _store(db, project.id, found, ai_model=llm.last_model)
         _mark_processed(db, [item.message for item in batch])
         db.commit()
         result.messages_processed += len(batch)

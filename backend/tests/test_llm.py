@@ -486,3 +486,185 @@ def test_gemini_network_error():
 
     with pytest.raises(LLMError, match="Could not reach Gemini"):
         GeminiProvider("gemini-2.5-flash", FAKE_KEY).generate("x")
+
+
+# ---------- fallback model ----------
+
+MAIN, FALLBACK = "gemini-3.8-flash", "gemini-3.5-flash"
+MAIN_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MAIN}:generateContent"
+FALLBACK_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{FALLBACK}:generateContent"
+
+
+def with_fallback() -> LLMClient:
+    return LLMClient(GeminiProvider(MAIN, FAKE_KEY), GeminiProvider(FALLBACK, FAKE_KEY, max_retries=0))
+
+
+@respx.mock
+def test_main_model_answers_without_fallback(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(return_value=ok())
+    fallback = respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = with_fallback()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.9
+    assert client.last_model == MAIN
+    assert fallback.call_count == 0
+
+
+@respx.mock
+def test_503_after_retries_goes_to_fallback_once(prompts_dir, waits, caplog):
+    main = respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)])
+    fallback = respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = with_fallback()
+
+    with caplog.at_level(logging.INFO, logger="app.ai.llm"):
+        result = client.complete_json("echo", VARS, Answer, thinking="low")
+
+    assert result.score == 0.9
+    assert (main.call_count, fallback.call_count, waits) == (4, 1, [2.0, 4.0, 8.0])
+    assert client.last_model == FALLBACK
+    # The same request, thinking level included
+    assert fallback.calls.last.request.content == main.calls.last.request.content
+    assert f"main model={MAIN} unavailable" in caplog.text and f"fallback model={FALLBACK}" in caplog.text
+    assert f"llm call prompt=echo provider=gemini model={FALLBACK} role=fallback" in caplog.text
+    assert FAKE_KEY not in caplog.text
+
+
+@respx.mock
+def test_timeout_goes_to_fallback(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+    respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = with_fallback()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.9
+    assert client.last_model == FALLBACK
+
+
+@respx.mock
+def test_daily_quota_goes_to_fallback_without_waiting(prompts_dir, waits):
+    main = respx.post(MAIN_URL).mock(return_value=httpx.Response(429, json=gemini_fixture("gemini_daily_quota.json")))
+    respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = with_fallback()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.9
+    assert (main.call_count, waits, client.last_model) == (1, [], FALLBACK)
+
+
+@respx.mock
+def test_both_unavailable_gives_one_clear_message(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)])
+    fallback = respx.post(FALLBACK_URL).mock(side_effect=[overloaded(), overloaded(), ok()])
+
+    with pytest.raises(LLMError) as exc:
+        with_fallback().complete_json("echo", VARS, Answer)
+
+    assert str(exc.value) == "Both Gemini models are busy or out of free quota. Try again later."
+    assert fallback.call_count == 1  # sent once, not retried
+    assert waits == [2.0, 4.0, 8.0]  # only the main model's retries
+
+
+@respx.mock
+def test_main_daily_quota_and_fallback_daily_quota(prompts_dir, waits):
+    quota = httpx.Response(429, json=gemini_fixture("gemini_daily_quota.json"))
+    respx.post(MAIN_URL).mock(return_value=quota)
+    respx.post(FALLBACK_URL).mock(return_value=quota)
+
+    with pytest.raises(LLMError, match=r"^Both Gemini models are busy or out of free quota\. Try again later\.$"):
+        with_fallback().complete_json("echo", VARS, Answer)
+
+
+@respx.mock
+def test_fallback_other_error_names_both_models(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)])
+    respx.post(FALLBACK_URL).mock(return_value=httpx.Response(404, json={"error": {"message": "Model not found."}}))
+
+    with pytest.raises(LLMError) as exc:
+        with_fallback().complete_json("echo", VARS, Answer)
+
+    message = str(exc.value)
+    assert MAIN in message and FALLBACK in message and "HTTP 404" in message and "Model not found" in message
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_other_main_errors_do_not_use_fallback(prompts_dir, waits, status):
+    respx.post(MAIN_URL).mock(return_value=httpx.Response(status, json={"error": {"message": "No."}}))
+    fallback = respx.post(FALLBACK_URL).mock(return_value=ok())
+
+    with pytest.raises(LLMError, match=f"HTTP {status}"):
+        with_fallback().complete_json("echo", VARS, Answer)
+    assert fallback.call_count == 0
+
+
+@respx.mock
+def test_network_error_does_not_use_fallback(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(side_effect=httpx.ConnectError("boom"))
+    fallback = respx.post(FALLBACK_URL).mock(return_value=ok())
+
+    with pytest.raises(LLMError, match="Could not reach Gemini"):
+        with_fallback().complete_json("echo", VARS, Answer)
+    assert fallback.call_count == 0
+
+
+@respx.mock
+def test_without_fallback_the_main_error_is_kept(prompts_dir, waits):
+    respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)])
+
+    with pytest.raises(LLMError, match=r"overloaded \(HTTP 503\)"):
+        LLMClient(GeminiProvider(MAIN, FAKE_KEY)).complete_json("echo", VARS, Answer)
+
+
+@respx.mock
+def test_later_calls_stay_on_the_fallback(prompts_dir, waits):
+    main = respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)] + [ok()])
+    fallback = respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = with_fallback()
+
+    client.complete_json("echo", VARS, Answer)
+    client.complete_json("echo", VARS, Answer)
+
+    # The second call (e.g. the next extraction batch) does not wait for the busy main model again
+    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, FALLBACK)
+
+
+@respx.mock
+def test_invalid_json_retry_goes_to_the_model_that_answered(prompts_dir, waits):
+    not_json = {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}
+    main = respx.post(MAIN_URL).mock(side_effect=[overloaded() for _ in range(4)])
+    fallback = respx.post(FALLBACK_URL).mock(side_effect=[httpx.Response(200, json=not_json), ok()])
+    client = with_fallback()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.9
+    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, FALLBACK)
+
+
+@respx.mock
+def test_fallback_provider_with_no_retries_sends_once(waits):
+    route = respx.post(FALLBACK_URL).mock(side_effect=[overloaded(), ok()])
+
+    with pytest.raises(llm.LLMUnavailableError, match=r"overloaded \(HTTP 503\)"):
+        GeminiProvider(FALLBACK, FAKE_KEY, max_retries=0).generate("x")
+    assert (route.call_count, waits) == (1, [])
+
+
+def test_fallback_is_built_from_settings(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_model", MAIN)
+    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
+    monkeypatch.setattr(settings, "llm_fallback_model", f" {FALLBACK} ")
+    monkeypatch.setattr(settings, "llm_timeout_seconds", 90.0)
+
+    client = llm.get_llm()
+
+    assert (client.provider.model, client.provider.max_retries) == (MAIN, 3)
+    assert isinstance(client.fallback, GeminiProvider)
+    assert (client.fallback.model, client.fallback.max_retries, client.fallback.timeout) == (FALLBACK, 0, 90.0)
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", MAIN])
+def test_no_fallback_when_empty_or_same_as_main(monkeypatch, value):
+    monkeypatch.setattr(settings, "llm_provider", "gemini")
+    monkeypatch.setattr(settings, "llm_model", MAIN)
+    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
+    monkeypatch.setattr(settings, "llm_fallback_model", value)
+
+    assert llm.get_llm().fallback is None

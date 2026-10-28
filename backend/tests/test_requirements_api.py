@@ -87,6 +87,7 @@ def test_extract_mixed_language_chat(client, owner, llm):
         "security",
         0.92,
     )
+    assert otp["current"]["ai_model"] == "fake-model"  # the model that answered is shown with each requirement
     assert (pdf["current"]["type"], pdf["current"]["nfr_category"]) == ("functional", None)
     assert load["current"]["nfr_category"] == "performance"
 
@@ -227,13 +228,14 @@ def test_edit_creates_new_version_and_keeps_old(client, extracted):
         "nfr_category": None,
         "actor": "user",
         "confidence": None,
+        "ai_model": None,
         "origin": "user",
         "created_by_id": user["id"],
         "created_at": None,
     }
     first = body["versions"][0]
     assert (first["version"], first["origin"], first["statement"]) == (1, "ai", req["current"]["statement"])
-    assert first["confidence"] == 0.92
+    assert (first["confidence"], first["ai_model"]) == (0.92, "fake-model")
     assert body["origin"] == "ai"  # the requirement itself stays AI-found
     assert body["sources"] == req["sources"]
 

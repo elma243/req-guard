@@ -81,6 +81,8 @@ class RequirementVersion(Base):
     actor: Mapped[str] = mapped_column(String(200), default="")
     # The AI's confidence (0-1); None for versions written by a user
     confidence: Mapped[float | None] = mapped_column(Float)
+    # The LLM model that wrote this version (e.g. "gemini-3.8-flash"); None for versions written by a user
+    ai_model: Mapped[str | None] = mapped_column(String(100))
     origin: Mapped[str] = mapped_column(String(10))
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
