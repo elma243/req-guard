@@ -168,14 +168,15 @@ def test_extract_only_chosen_messages(client, extracted, llm):
 
 def test_llm_not_configured_is_503_with_names_only(client, owner, monkeypatch):
     headers, base, _ = owner
-    monkeypatch.setattr(settings, "llm_provider", None)
+    monkeypatch.setattr(settings, "llm_chain", "groq,gemini")
+    monkeypatch.setattr(settings, "groq_api_key", None)
     monkeypatch.setattr(settings, "llm_model", None)
     monkeypatch.setattr(settings, "llm_api_key", None)
 
     res = extract(client, headers, base)
 
     assert res.status_code == 503
-    assert "LLM_PROVIDER" in res.json()["detail"] and "LLM_API_KEY" in res.json()["detail"]
+    assert "GROQ_API_KEY" in res.json()["detail"] and "LLM_API_KEY" in res.json()["detail"]
 
 
 def test_llm_error_with_partial_progress(client, owner):

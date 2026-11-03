@@ -1,4 +1,5 @@
-"""LLM client: prompt loading, JSON validation with one retry, Gemini over mocked HTTP. No real API calls."""
+"""LLM client: prompt loading, JSON validation with one retry, Gemini and Groq over mocked HTTP, the provider
+chain. No real API calls."""
 
 import json
 import logging
@@ -10,11 +11,14 @@ import respx
 from pydantic import BaseModel
 
 from app.ai import llm
-from app.ai.llm import GeminiProvider, LLMClient, LLMError, LLMNotConfiguredError, LLMResponse
+from app.ai.llm import GeminiProvider, GroqProvider, LLMClient, LLMError, LLMNotConfiguredError, LLMResponse
 from app.core.config import settings
 
 FAKE_KEY = "AIza-test-key-0123456789"
+GROQ_KEY = "gsk_test-key-0123456789"
+GROQ_MODEL = "openai/gpt-oss-120b"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 LLM_FIXTURES = Path(__file__).parent / "fixtures" / "llm"
 
 
@@ -161,43 +165,95 @@ def test_thinking_level(value, level):
 # ---------- configuration ----------
 
 
-def test_not_configured_names_variables_only(monkeypatch):
-    monkeypatch.setattr(settings, "llm_provider", "gemini")
-    monkeypatch.setattr(settings, "llm_model", "")
-    monkeypatch.setattr(settings, "llm_api_key", None)
+@pytest.fixture
+def chain_settings(monkeypatch):
+    """Groq and Gemini (with a fallback model) configured; tests change single values."""
+    values = {
+        "llm_chain": "groq,gemini",
+        "groq_api_key": GROQ_KEY,
+        "groq_model": GROQ_MODEL,
+        "llm_model": "gemini-3.8-flash",
+        "llm_api_key": FAKE_KEY,
+        "llm_fallback_model": "gemini-3.5-flash",
+        "llm_timeout_seconds": 90.0,
+    }
+    for name, value in values.items():
+        monkeypatch.setattr(settings, name, value)
+    return lambda name, value: monkeypatch.setattr(settings, name, value)
+
+
+def models(client: LLMClient) -> list[tuple[str, str, int]]:
+    return [(p.name, p.model, p.max_retries) for p in client.providers]
+
+
+def test_chain_is_built_in_llm_chain_order(chain_settings):
+    client = llm.get_llm()
+
+    assert models(client) == [
+        ("groq", GROQ_MODEL, 3),
+        ("gemini", "gemini-3.8-flash", 3),
+        ("gemini", "gemini-3.5-flash", 0),  # sent once: the main Gemini model already used the retries
+    ]
+    assert isinstance(client.providers[0], GroqProvider)
+    assert all(p.timeout == 90.0 for p in client.providers)
+
+
+def test_chain_order_and_spelling_come_from_settings(chain_settings):
+    chain_settings("llm_chain", " Gemini , groq,gemini ")
+
+    assert [name for name, _, _ in models(llm.get_llm())] == ["gemini", "gemini", "groq"]
+
+
+def test_chain_skips_a_provider_without_key(chain_settings, caplog):
+    chain_settings("groq_api_key", "  ")
+
+    with caplog.at_level(logging.INFO, logger="app.ai.llm"):
+        client = llm.get_llm()
+
+    assert [name for name, _, _ in models(client)] == ["gemini", "gemini"]
+    assert "skipping provider=groq, GROQ_API_KEY not set" in caplog.text
+
+
+def test_not_configured_names_variables_only(chain_settings):
+    chain_settings("groq_api_key", None)
+    chain_settings("llm_model", "")
+    chain_settings("llm_api_key", None)
 
     with pytest.raises(LLMNotConfiguredError) as exc:
         llm.get_llm()
-    assert "LLM_MODEL" in str(exc.value) and "LLM_API_KEY" in str(exc.value)
-    assert "LLM_PROVIDER" not in str(exc.value)
+    message = str(exc.value)
+    assert all(name in message for name in ("GROQ_API_KEY", "LLM_MODEL", "LLM_API_KEY"))
+    assert FAKE_KEY not in message and GROQ_KEY not in message
 
 
-def test_unsupported_provider(monkeypatch):
-    monkeypatch.setattr(settings, "llm_provider", "parrot")
-    monkeypatch.setattr(settings, "llm_model", "m")
-    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
+@pytest.mark.parametrize("chain", ["", " , "])
+def test_empty_chain_is_not_configured(chain_settings, chain):
+    chain_settings("llm_chain", chain)
 
-    with pytest.raises(LLMNotConfiguredError, match="not supported"):
+    with pytest.raises(LLMNotConfiguredError, match="LLM_CHAIN"):
         llm.get_llm()
 
 
-def test_gemini_is_built_from_settings(monkeypatch):
-    monkeypatch.setattr(settings, "llm_provider", " Gemini ")
-    monkeypatch.setattr(settings, "llm_model", "gemini-2.5-flash")
-    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
+def test_unsupported_provider(chain_settings):
+    chain_settings("llm_chain", "groq,parrot")
 
-    monkeypatch.setattr(settings, "llm_timeout_seconds", 90.0)
-
-    client = llm.get_llm()
-    assert isinstance(client.provider, GeminiProvider)
-    assert client.provider.model == "gemini-2.5-flash"
-    assert client.provider.timeout == 90.0
+    with pytest.raises(LLMNotConfiguredError, match="unsupported provider.*parrot.*Supported: groq, gemini"):
+        llm.get_llm()
 
 
-def test_timeout_default_is_120_seconds():
+def test_gemini_only_chain(chain_settings):
+    chain_settings("llm_chain", "gemini")
+    chain_settings("llm_fallback_model", None)
+
+    assert models(llm.get_llm()) == [("gemini", "gemini-3.8-flash", 3)]
+
+
+def test_defaults():
     fields = type(settings).model_fields
     assert fields["llm_timeout_seconds"].default == 120.0
     assert fields["llm_extraction_thinking"].default == "low"
+    assert fields["llm_chain"].default == "groq,gemini"
+    assert fields["groq_model"].default == "openai/gpt-oss-120b"
 
 
 # ---------- Gemini over HTTP ----------
@@ -506,7 +562,7 @@ def test_main_model_answers_without_fallback(prompts_dir, waits):
     client = with_fallback()
 
     assert client.complete_json("echo", VARS, Answer).score == 0.9
-    assert client.last_model == MAIN
+    assert client.last_model == f"gemini:{MAIN}"
     assert fallback.call_count == 0
 
 
@@ -521,11 +577,12 @@ def test_503_after_retries_goes_to_fallback_once(prompts_dir, waits, caplog):
 
     assert result.score == 0.9
     assert (main.call_count, fallback.call_count, waits) == (4, 1, [2.0, 4.0, 8.0])
-    assert client.last_model == FALLBACK
+    assert client.last_model == f"gemini:{FALLBACK}"
     # The same request, thinking level included
     assert fallback.calls.last.request.content == main.calls.last.request.content
-    assert f"main model={MAIN} unavailable" in caplog.text and f"fallback model={FALLBACK}" in caplog.text
-    assert f"llm call prompt=echo provider=gemini model={FALLBACK} role=fallback" in caplog.text
+    assert f"provider=gemini model={MAIN} unavailable" in caplog.text
+    assert f"llm call prompt=echo provider=gemini model={FALLBACK} step=2" in caplog.text
+    assert f"llm answered by provider=gemini model={FALLBACK}" in caplog.text
     assert FAKE_KEY not in caplog.text
 
 
@@ -536,7 +593,7 @@ def test_timeout_goes_to_fallback(prompts_dir, waits):
     client = with_fallback()
 
     assert client.complete_json("echo", VARS, Answer).score == 0.9
-    assert client.last_model == FALLBACK
+    assert client.last_model == f"gemini:{FALLBACK}"
 
 
 @respx.mock
@@ -546,7 +603,7 @@ def test_daily_quota_goes_to_fallback_without_waiting(prompts_dir, waits):
     client = with_fallback()
 
     assert client.complete_json("echo", VARS, Answer).score == 0.9
-    assert (main.call_count, waits, client.last_model) == (1, [], FALLBACK)
+    assert (main.call_count, waits, client.last_model) == (1, [], f"gemini:{FALLBACK}")
 
 
 @respx.mock
@@ -557,7 +614,7 @@ def test_both_unavailable_gives_one_clear_message(prompts_dir, waits):
     with pytest.raises(LLMError) as exc:
         with_fallback().complete_json("echo", VARS, Answer)
 
-    assert str(exc.value) == "Both Gemini models are busy or out of free quota. Try again later."
+    assert str(exc.value) == "All AI models are busy or out of free quota. Try again later."
     assert fallback.call_count == 1  # sent once, not retried
     assert waits == [2.0, 4.0, 8.0]  # only the main model's retries
 
@@ -568,7 +625,7 @@ def test_main_daily_quota_and_fallback_daily_quota(prompts_dir, waits):
     respx.post(MAIN_URL).mock(return_value=quota)
     respx.post(FALLBACK_URL).mock(return_value=quota)
 
-    with pytest.raises(LLMError, match=r"^Both Gemini models are busy or out of free quota\. Try again later\.$"):
+    with pytest.raises(LLMError, match=r"^All AI models are busy or out of free quota\. Try again later\.$"):
         with_fallback().complete_json("echo", VARS, Answer)
 
 
@@ -623,7 +680,7 @@ def test_later_calls_stay_on_the_fallback(prompts_dir, waits):
     client.complete_json("echo", VARS, Answer)
 
     # The second call (e.g. the next extraction batch) does not wait for the busy main model again
-    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, FALLBACK)
+    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, f"gemini:{FALLBACK}")
 
 
 @respx.mock
@@ -634,7 +691,7 @@ def test_invalid_json_retry_goes_to_the_model_that_answered(prompts_dir, waits):
     client = with_fallback()
 
     assert client.complete_json("echo", VARS, Answer).score == 0.9
-    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, FALLBACK)
+    assert (main.call_count, fallback.call_count, client.last_model) == (4, 2, f"gemini:{FALLBACK}")
 
 
 @respx.mock
@@ -646,25 +703,232 @@ def test_fallback_provider_with_no_retries_sends_once(waits):
     assert (route.call_count, waits) == (1, [])
 
 
-def test_fallback_is_built_from_settings(monkeypatch):
-    monkeypatch.setattr(settings, "llm_provider", "gemini")
-    monkeypatch.setattr(settings, "llm_model", MAIN)
-    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
-    monkeypatch.setattr(settings, "llm_fallback_model", f" {FALLBACK} ")
-    monkeypatch.setattr(settings, "llm_timeout_seconds", 90.0)
-
-    client = llm.get_llm()
-
-    assert (client.provider.model, client.provider.max_retries) == (MAIN, 3)
-    assert isinstance(client.fallback, GeminiProvider)
-    assert (client.fallback.model, client.fallback.max_retries, client.fallback.timeout) == (FALLBACK, 0, 90.0)
-
-
 @pytest.mark.parametrize("value", [None, "", "  ", MAIN])
-def test_no_fallback_when_empty_or_same_as_main(monkeypatch, value):
-    monkeypatch.setattr(settings, "llm_provider", "gemini")
-    monkeypatch.setattr(settings, "llm_model", MAIN)
-    monkeypatch.setattr(settings, "llm_api_key", FAKE_KEY)
-    monkeypatch.setattr(settings, "llm_fallback_model", value)
+def test_no_fallback_when_empty_or_same_as_main(chain_settings, value):
+    chain_settings("llm_chain", "gemini")
+    chain_settings("llm_model", MAIN)
+    chain_settings("llm_fallback_model", value)
 
-    assert llm.get_llm().fallback is None
+    assert models(llm.get_llm()) == [("gemini", MAIN, 3)]
+
+
+# ---------- Groq over HTTP ----------
+
+
+def groq_ok():
+    return httpx.Response(200, json=gemini_fixture("groq_response.json"))
+
+
+@respx.mock
+def test_groq_request_and_response():
+    route = respx.post(GROQ_URL).mock(return_value=groq_ok())
+
+    response = GroqProvider(GROQ_MODEL, GROQ_KEY).generate("Return JSON please", thinking="low")
+
+    assert response.text == '{"answer": "লগইন পেজে OTP লাগবে", "score": 0.8}'
+    assert (response.input_tokens, response.output_tokens) == (130, 42)
+    request = route.calls.last.request
+    assert request.headers["Authorization"] == f"Bearer {GROQ_KEY}"
+    assert GROQ_KEY not in str(request.url)
+    assert json.loads(request.content) == {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": "Return JSON please"}],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "reasoning_effort": "low",
+    }
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "model, thinking, effort",
+    [(GROQ_MODEL, None, None), (GROQ_MODEL, "minimal", "low"), (GROQ_MODEL, "high", "high"), ("llama-3.3-70b", "low", None)],
+)
+def test_groq_reasoning_effort_only_for_gpt_oss(model, thinking, effort):
+    route = respx.post(GROQ_URL).mock(return_value=groq_ok())
+
+    GroqProvider(model, GROQ_KEY).generate("x", thinking=thinking)
+
+    assert json.loads(route.calls.last.request.content).get("reasoning_effort") == effort
+
+
+@respx.mock
+def test_groq_answer_is_validated_like_gemini(prompts_dir):
+    respx.post(GROQ_URL).mock(return_value=groq_ok())
+    client = LLMClient(GroqProvider(GROQ_MODEL, GROQ_KEY))
+
+    result = client.complete_json("echo", VARS, Answer)
+
+    assert (result.answer, result.score) == ("লগইন পেজে OTP লাগবে", 0.8)
+    assert client.last_model == f"groq:{GROQ_MODEL}"
+
+
+@respx.mock
+def test_groq_503_then_200_is_retried(waits):
+    route = respx.post(GROQ_URL).mock(side_effect=[overloaded(), groq_ok()])
+
+    GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+
+    assert (route.call_count, waits) == (2, [2.0])
+
+
+@respx.mock
+def test_groq_per_minute_429_waits_retry_after(waits):
+    limited = httpx.Response(429, headers={"retry-after": "3"}, json={"error": {"message": "tokens per minute (TPM)"}})
+    respx.post(GROQ_URL).mock(side_effect=[limited, groq_ok()])
+
+    GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+
+    assert waits == [3.0]
+
+
+@respx.mock
+def test_groq_daily_quota_fails_at_once(waits):
+    quota = httpx.Response(429, headers={"retry-after": "874"}, json=gemini_fixture("groq_daily_quota.json"))
+    route = respx.post(GROQ_URL).mock(side_effect=[quota, groq_ok()])
+
+    with pytest.raises(llm.LLMUnavailableError, match=r"^Groq daily free quota used up\. Try again in about 1 hour\.$"):
+        GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+    assert (route.call_count, waits) == (1, [])
+
+
+@respx.mock
+def test_groq_503_after_retries_is_unavailable(waits):
+    respx.post(GROQ_URL).mock(side_effect=[overloaded() for _ in range(4)])
+
+    with pytest.raises(llm.LLMUnavailableError, match=r"^Groq is overloaded \(HTTP 503\)"):
+        GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+    assert waits == [2.0, 4.0, 8.0]
+
+
+@respx.mock
+def test_groq_timeout_is_unavailable():
+    respx.post(GROQ_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+
+    with pytest.raises(llm.LLMUnavailableError, match="Groq did not answer within 30 seconds"):
+        GroqProvider(GROQ_MODEL, GROQ_KEY, timeout=30.0).generate("x")
+
+
+@respx.mock
+def test_groq_failed_json_check_is_asked_once_more(prompts_dir, waits, caplog):
+    failed = httpx.Response(400, json=gemini_fixture("groq_json_validate_failed.json"))
+    route = respx.post(GROQ_URL).mock(side_effect=[failed, groq_ok()])
+
+    with caplog.at_level(logging.INFO, logger="app.ai.llm"):
+        result = LLMClient(GroqProvider(GROQ_MODEL, GROQ_KEY)).complete_json("echo", VARS, Answer)
+
+    assert result.score == 0.8
+    assert route.call_count == 2
+    second_prompt = json.loads(route.calls.last.request.content)["messages"][0]["content"]
+    assert "Your previous answer was rejected" in second_prompt
+    assert "failed Groq's JSON check" in caplog.text and "half" not in caplog.text
+
+
+@respx.mock
+def test_groq_error_is_clear_and_hides_key(caplog):
+    body = {"error": {"message": f"Invalid API Key {GROQ_KEY}", "type": "invalid_request_error", "code": "invalid_api_key"}}
+    route = respx.post(GROQ_URL).mock(return_value=httpx.Response(401, json=body))
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(LLMError) as exc:
+        GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+
+    assert str(exc.value) == "Groq returned an error (HTTP 401): Invalid API Key ***"
+    assert not isinstance(exc.value, llm.LLMUnavailableError)
+    assert route.call_count == 1
+    assert GROQ_KEY not in caplog.text
+
+
+@respx.mock
+def test_groq_empty_answer():
+    empty = {"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "length"}]}
+    respx.post(GROQ_URL).mock(return_value=httpx.Response(200, json=empty))
+
+    with pytest.raises(LLMError, match=r"Groq returned no answer \(length\)"):
+        GroqProvider(GROQ_MODEL, GROQ_KEY).generate("x")
+
+
+# ---------- chain: Groq, then Gemini main, then Gemini fallback ----------
+
+
+def chain() -> LLMClient:
+    return LLMClient(
+        GroqProvider(GROQ_MODEL, GROQ_KEY),
+        GeminiProvider(MAIN, FAKE_KEY),
+        GeminiProvider(FALLBACK, FAKE_KEY, max_retries=0),
+    )
+
+
+@respx.mock
+def test_chain_groq_answers_first(prompts_dir, waits):
+    groq = respx.post(GROQ_URL).mock(return_value=groq_ok())
+    gemini = respx.post(MAIN_URL).mock(return_value=ok())
+    client = chain()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.8
+    assert (groq.call_count, gemini.call_count, client.last_model) == (1, 0, f"groq:{GROQ_MODEL}")
+
+
+@respx.mock
+def test_chain_groq_busy_goes_to_gemini_and_stays_there(prompts_dir, waits, caplog):
+    groq = respx.post(GROQ_URL).mock(side_effect=[overloaded() for _ in range(4)])
+    gemini = respx.post(MAIN_URL).mock(return_value=ok())
+    client = chain()
+
+    with caplog.at_level(logging.INFO, logger="app.ai.llm"):
+        assert client.complete_json("echo", VARS, Answer, thinking="low").score == 0.9
+        client.complete_json("echo", VARS, Answer)
+
+    assert (groq.call_count, gemini.call_count) == (4, 2)  # the second call skips the busy Groq
+    assert client.last_model == f"gemini:{MAIN}"
+    assert f"provider=groq model={GROQ_MODEL} unavailable" in caplog.text
+    assert caplog.text.count(f"llm answered by provider=gemini model={MAIN}") == 1
+    assert GROQ_KEY not in caplog.text and FAKE_KEY not in caplog.text
+
+
+@respx.mock
+def test_chain_groq_quota_and_gemini_timeout_reach_the_fallback(prompts_dir, waits):
+    respx.post(GROQ_URL).mock(return_value=httpx.Response(429, json=gemini_fixture("groq_daily_quota.json")))
+    respx.post(MAIN_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+    respx.post(FALLBACK_URL).mock(return_value=ok())
+    client = chain()
+
+    assert client.complete_json("echo", VARS, Answer).score == 0.9
+    assert client.last_model == f"gemini:{FALLBACK}"
+    assert waits == []
+
+
+@respx.mock
+def test_chain_all_unavailable(prompts_dir, waits):
+    respx.post(GROQ_URL).mock(return_value=httpx.Response(429, json=gemini_fixture("groq_daily_quota.json")))
+    respx.post(MAIN_URL).mock(return_value=httpx.Response(429, json=gemini_fixture("gemini_daily_quota.json")))
+    fallback = respx.post(FALLBACK_URL).mock(return_value=overloaded())
+    client = chain()
+
+    with pytest.raises(llm.LLMUnavailableError, match=r"^All AI models are busy or out of free quota\. Try again later\.$"):
+        client.complete_json("echo", VARS, Answer)
+    # A later call does not ask any of them again
+    with pytest.raises(llm.LLMUnavailableError):
+        client.complete_json("echo", VARS, Answer)
+    assert fallback.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_chain_other_groq_errors_do_not_go_on(prompts_dir, waits, status):
+    respx.post(GROQ_URL).mock(return_value=httpx.Response(status, json={"error": {"message": "No."}}))
+    gemini = respx.post(MAIN_URL).mock(return_value=ok())
+
+    with pytest.raises(LLMError, match=f"Groq returned an error \\(HTTP {status}\\)"):
+        chain().complete_json("echo", VARS, Answer)
+    assert gemini.call_count == 0
+
+
+@respx.mock
+def test_chain_later_error_names_the_unavailable_models(prompts_dir, waits):
+    respx.post(GROQ_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+    respx.post(MAIN_URL).mock(return_value=httpx.Response(401, json={"error": {"message": "Bad key."}}))
+
+    with pytest.raises(LLMError) as exc:
+        chain().complete_json("echo", VARS, Answer)
+
+    assert str(exc.value).startswith(f"{GROQ_MODEL} is unavailable and {MAIN} failed: Gemini returned an error (HTTP 401)")

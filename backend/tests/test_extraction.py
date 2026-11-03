@@ -276,7 +276,7 @@ def test_requirements_store_the_fallback_model_that_answered(db, project):
     result = extract_requirements(db, project, llm)
 
     assert (result.requirements_created, result.error) == (1, None)
-    assert db.query(Requirement).one().current.ai_model == "fallback-model"
+    assert db.query(Requirement).one().current.ai_model == "gemini:fallback-model"
 
 
 def test_both_models_unavailable_is_the_run_error(db, project):
@@ -284,7 +284,7 @@ def test_both_models_unavailable_is_the_run_error(db, project):
 
     result = extract_requirements(db, project, llm_module.LLMClient(_Busy(), _Answers(None)))
 
-    assert result.error == "Both Gemini models are busy or out of free quota. Try again later."
+    assert result.error == "All AI models are busy or out of free quota. Try again later."
     assert (result.requirements_created, result.messages_remaining) == (0, 1)
     db.refresh(message)
     assert message.requirements_extracted_at is None

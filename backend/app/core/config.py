@@ -23,11 +23,15 @@ class Settings(BaseSettings):
     # Database: falls back to a local SQLite file when DATABASE_URL is empty
     database_url: str = ""
 
-    # LLM
-    llm_provider: str | None = None
+    # LLM: providers asked in this order; the next one only when one is busy, rate limited or timed out
+    llm_chain: str = "groq,gemini"
+    # Groq (OpenAI-compatible API)
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+    # Gemini
     llm_model: str | None = None
     llm_api_key: str | None = None
-    # Model asked once when LLM_MODEL is overloaded, times out or is out of daily quota (empty: no fallback)
+    # Gemini model asked once when LLM_MODEL is overloaded, times out or is out of daily quota (empty: none)
     llm_fallback_model: str | None = None
     # Seconds to wait for one LLM HTTP response (thinking models can be slow when the service is busy)
     llm_timeout_seconds: float = 120.0
