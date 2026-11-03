@@ -8,6 +8,11 @@
 4. Store each requirement as an AI suggestion (origin="ai", status="suggested") with version 1 and its
    source links, and mark the messages as processed.
 
+When no AI model answers (all providers in LLM_CHAIN busy, out of quota or failing) or none is configured,
+a batch falls back to simple cue-word rules: every candidate sentence with a cue such as "must", "lagbe"
+or "লাগবে" becomes one suggestion whose text is the source sentence itself (confidence 0.4, ai_model
+"rule-based"), and the result carries the notice "AI unavailable — used rule-based extraction."
+
 Messages are read once. A re-run (force=True or chosen message ids) only replaces AI suggestions that are
 still "suggested"; accepted, edited, rejected, merged and user-created requirements are never touched (rule 2).
 """
@@ -23,7 +28,7 @@ from functools import lru_cache
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.ai.llm import LLMClient, LLMError, now, thinking_level
+from app.ai.llm import LLMClient, LLMError, LLMUnavailableError, now, thinking_level
 from app.core.config import settings
 from app.models import Message, Project, Requirement, RequirementSource, RequirementVersion
 from app.models.requirement import requirement_code
@@ -181,6 +186,42 @@ def _context_before(db: Session, message: Message) -> str:
     return f"{previous.author}: {text}" if previous.author else text
 
 
+# ---------- rule-based fallback ----------
+
+RULE_BASED_MODEL = "rule-based"
+RULE_BASED_CONFIDENCE = 0.4
+RULE_BASED_NOTICE = "AI unavailable — used rule-based extraction."
+
+_BANGLA = "ঀ-৿"
+# English and Banglish cues as whole words; Bangla cues not inside a longer Bengali word (\b is unreliable
+# next to Bengali vowel signs)
+_CUES = re.compile(
+    r"\b(?:must|should|shall|needs?\s+to|required|lagbe|hobe|korte\s+parbe|chai|thakbe|jabe)\b"
+    rf"|(?<![{_BANGLA}])(?:লাগবে|হবে|করতে\s+পারবে|চাই|থাকবে|যাবে)(?![{_BANGLA}])",
+    re.IGNORECASE,
+)
+
+
+def has_requirement_cue(sentence: str) -> bool:
+    return _CUES.search(sentence) is not None
+
+
+def rule_based_answer(sentences: list[Sentence]) -> ExtractionAnswer:
+    """One requirement per sentence with a cue word, its text the source sentence itself."""
+    return ExtractionAnswer(
+        requirements=[
+            ExtractedRequirement(
+                statement=s.text[:2000],
+                type="functional",  # the rules cannot tell functional from non-functional
+                sentence_ids=[s.id],
+                confidence=RULE_BASED_CONFIDENCE,
+            )
+            for s in sentences
+            if has_requirement_cue(s.text)
+        ]
+    )
+
+
 # ---------- 4. storing ----------
 
 
@@ -304,16 +345,19 @@ def _mark_processed(db: Session, messages: list[Message]) -> None:
 def extract_requirements(
     db: Session,
     project: Project,
-    llm: LLMClient,
+    llm: LLMClient | None,
     *,
     force: bool = False,
     message_ids: list[int] | None = None,
+    llm_unavailable_reason: str | None = None,
 ) -> ExtractResult:
     """Extract requirements from the project's messages that were not read yet.
 
     force=True reads all messages again; `message_ids` reads only those (again). Each batch is committed on
-    its own, so an LLM error keeps the work already done and the rest can be continued with another run.
-    A run ends after RUN_TIME_BUDGET_SECONDS at the latest.
+    its own. A batch the LLM cannot answer is done with the rule-based fallback; once every provider is
+    unavailable, the rest of the run uses the rules too. `llm=None` (no provider configured, the reason in
+    `llm_unavailable_reason`) uses the rules for every batch. LLM batches start only within
+    RUN_TIME_BUDGET_SECONDS; rule-based batches need no time.
     """
     if force or message_ids is not None:
         # Mark the chosen messages as unread, so a run stopped by the per-run limit continues with a normal run
@@ -347,29 +391,55 @@ def extract_requirements(
 
     deadline = now() + RUN_TIME_BUDGET_SECONDS
     thinking = thinking_level(settings.llm_extraction_thinking)
+    rules_only = llm is None
+    if rules_only:
+        result.ai_error = llm_unavailable_reason
     for batch in make_batches(items):
-        if now() + MIN_BATCH_SECONDS > deadline:
+        if not rules_only and now() + MIN_BATCH_SECONDS > deadline:
             break  # out of time for this run; the rest stays waiting for the next one
         sentences = {s.id: s for item in batch for s in item.sentences}
-        try:
-            result.llm_calls += 1
-            answer = llm.complete_json(
-                PROMPT,
-                {"batch": [item.payload() for item in batch]},
-                ExtractionAnswer,
-                thinking=thinking,
-                deadline=deadline,
-            )
-        except LLMError as exc:
-            db.rollback()
-            result.error = str(exc)
-            break
+        answer, ai_model = None, RULE_BASED_MODEL
+        if not rules_only:
+            try:
+                result.llm_calls += 1
+                answer = llm.complete_json(
+                    PROMPT,
+                    {"batch": [item.payload() for item in batch]},
+                    ExtractionAnswer,
+                    thinking=thinking,
+                    deadline=deadline,
+                )
+                ai_model = llm.last_model
+            except LLMError as exc:
+                db.rollback()
+                result.ai_error = str(exc)
+                # Every provider is busy or out of quota: do not wait for them again in this run
+                rules_only = isinstance(exc, LLMUnavailableError)
+                logger.warning(
+                    "extraction project=%d: AI failed (%s); using rule-based extraction for %s",
+                    project.id,
+                    exc,
+                    "the rest of the run" if rules_only else "this batch",
+                )
+        if answer is None:
+            answer = rule_based_answer(list(sentences.values()))
+            result.rule_based_batches += 1
+            result.notice = RULE_BASED_NOTICE
         _delete_replaceable(db, project.id, {item.message.id for item in batch})
         found = resolve_sentences(answer, sentences)
-        result.requirements_created += _store(db, project.id, found, ai_model=llm.last_model)
+        result.requirements_created += _store(db, project.id, found, ai_model=ai_model)
         _mark_processed(db, [item.message for item in batch])
         db.commit()
         result.messages_processed += len(batch)
 
     result.messages_remaining = total - result.messages_processed
+    logger.info(
+        "extraction project=%d done: messages=%d requirements=%d llm_calls=%d rule_based_batches=%d answered_by=%s",
+        project.id,
+        result.messages_processed,
+        result.requirements_created,
+        result.llm_calls,
+        result.rule_based_batches,
+        llm.last_model if llm is not None else None,
+    )
     return result

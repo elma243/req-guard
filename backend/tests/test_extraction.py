@@ -1,5 +1,6 @@
 """Extraction pipeline: sentence splitting, small-talk filter, batching, id → exact sentence, storing. Fake LLM."""
 
+import itertools
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,6 +24,7 @@ from tests.fake_llm import FakeLLM
 
 BANGLA_OTP = "লগইন পেজে OTP লাগবে।"
 BANGLISH_PDF = "ami chai report ta PDF e download hok."
+CSV = "Admin should be able to export all orders as CSV."
 
 # ---------- sentences ----------
 
@@ -136,6 +138,64 @@ def test_prompt_has_batch_placeholder_and_language_note():
     assert "Do not guess" in prompt
 
 
+# ---------- rule-based fallback ----------
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "The app must load in 2 seconds.",
+        "Customers SHOULD get an SMS.",
+        "The report shall be in PDF.",
+        "We need to add dark mode.",
+        "Admin needs to approve refunds.",
+        "Login with OTP is required.",
+        "Login e OTP lagbe.",
+        "Report ta PDF e download korte hobe",
+        "Admin user delete korte parbe",
+        "ami chai report ta PDF e download hok.",
+        "Dark mode thakbe",
+        "Order cancel kora jabe 1 ghontar moddhe",
+        BANGLA_OTP,
+        "রিপোর্ট PDF হবে।",
+        "অ্যাডমিন ইউজার ডিলিট করতে পারবে।",
+        "আমরা ডার্ক মোড চাই।",
+        "অর্ডার হিস্টরি থাকবে।",
+        "অর্ডার বাতিল করা যাবে।",
+    ],
+)
+def test_requirement_cues(sentence):
+    assert extraction.has_requirement_cue(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "The requirements look fine.",  # "required" only as a whole word
+        "Mustard yellow is nice.",
+        "Chaile kalke call dao.",  # "chai" inside a longer word
+        "Ami jabena.",
+        "চাইলে কালকে কল দিন।",  # চাই inside a longer word
+        "আমি যাবেনা।",
+        "Kalke meeting ta 3 tay?",
+        "We tested the login page yesterday.",
+    ],
+)
+def test_no_requirement_cue(sentence):
+    assert not extraction.has_requirement_cue(sentence)
+
+
+def test_rule_based_answer_keeps_the_exact_sentence():
+    sentences = [Sentence("m1.s1", 1, BANGLA_OTP), Sentence("m1.s2", 1, "We tested it."), Sentence("m2.s1", 2, CSV)]
+
+    answer = extraction.rule_based_answer(sentences)
+
+    assert [(r.statement, r.sentence_ids, r.confidence, r.type) for r in answer.requirements] == [
+        (BANGLA_OTP, ["m1.s1"], 0.4, "functional"),
+        (CSV, ["m2.s1"], 0.4, "functional"),
+    ]
+
+
 # ---------- the run ----------
 
 
@@ -181,7 +241,7 @@ def test_run_stores_exact_sentences_and_marks_all_processed(db, project):
     result = extract_requirements(db, project, llm)
 
     assert (result.messages_processed, result.messages_small_talk, result.messages_remaining) == (3, 1, 0)
-    assert (result.requirements_created, result.llm_calls, result.error) == (4, 1, None)
+    assert (result.requirements_created, result.llm_calls, result.ai_error, result.notice) == (4, 1, None, None)
     assert "ok, thanks!" not in llm.sentences_sent
 
     reqs = db.query(Requirement).order_by(Requirement.number).all()
@@ -229,27 +289,30 @@ def test_only_small_talk_needs_no_llm_call(db, project):
     assert llm.calls == []
 
 
-def test_llm_error_keeps_finished_batches(db, project, monkeypatch):
+def test_llm_error_uses_rules_for_that_batch_only(db, project, monkeypatch):
     monkeypatch.setattr(extraction, "MAX_BATCH_MESSAGES", 1)
-    first, second = add_messages(db, project, f"{BANGLA_OTP}", "Admin should be able to export all orders as CSV.")
+    add_messages(db, project, BANGLA_OTP, CSV, BANGLISH_PDF)
+    llm = FakeLLM(fail_on_call=2)
 
-    result = extract_requirements(db, project, FakeLLM(fail_on_call=2))
+    result = extract_requirements(db, project, llm)
 
-    assert (result.messages_processed, result.messages_remaining, result.requirements_created) == (1, 1, 1)
-    assert "invalid answer twice" in result.error
-    db.refresh(first)
-    db.refresh(second)
-    assert first.requirements_extracted_at is not None
-    assert second.requirements_extracted_at is None
-
-    again = extract_requirements(db, project, FakeLLM())
-    assert (again.messages_processed, again.requirements_created, again.error) == (1, 2, None)
+    # An invalid answer is not "unavailable": the third batch asks the LLM again
+    assert (result.messages_processed, result.messages_remaining, result.llm_calls) == (3, 0, 3)
+    assert (result.rule_based_batches, result.notice) == (1, "AI unavailable — used rule-based extraction.")
+    assert "invalid answer twice" in result.ai_error
+    by_sentence = {r.sources[0].source_sentence: r.current for r in db.query(Requirement).all()}
+    assert by_sentence[CSV].ai_model == "rule-based"
+    assert by_sentence[BANGLA_OTP].ai_model == by_sentence[BANGLISH_PDF].ai_model == "fake-model"
 
 
 class _Busy:
     name, model = "gemini", "main-model"
 
+    def __init__(self):
+        self.calls = 0
+
     def generate(self, prompt, **options):
+        self.calls += 1
         raise llm_module.LLMUnavailableError("Gemini is overloaded (HTTP 503). Try again in a few minutes.")
 
 
@@ -275,19 +338,66 @@ def test_requirements_store_the_fallback_model_that_answered(db, project):
 
     result = extract_requirements(db, project, llm)
 
-    assert (result.requirements_created, result.error) == (1, None)
+    assert (result.requirements_created, result.ai_error, result.rule_based_batches) == (1, None, 0)
     assert db.query(Requirement).one().current.ai_model == "gemini:fallback-model"
 
 
-def test_both_models_unavailable_is_the_run_error(db, project):
-    (message,) = add_messages(db, project, "Admin should be able to export all orders as CSV.")
+def test_all_models_unavailable_uses_rules_for_the_rest_of_the_run(db, project, monkeypatch, caplog):
+    monkeypatch.setattr(extraction, "MAX_BATCH_MESSAGES", 1)
+    messages = add_messages(db, project, CSV, BANGLA_OTP, "Kalke meeting ta 3 tay?")
+    busy = _Busy()
 
-    result = extract_requirements(db, project, llm_module.LLMClient(_Busy(), _Answers(None)))
+    with caplog.at_level("WARNING", logger="app.nlp.extraction"):
+        result = extract_requirements(db, project, llm_module.LLMClient(busy, _Answers(None)))
 
-    assert result.error == "All AI models are busy or out of free quota. Try again later."
-    assert (result.requirements_created, result.messages_remaining) == (0, 1)
-    db.refresh(message)
-    assert message.requirements_extracted_at is None
+    assert result.ai_error == "All AI models are busy or out of free quota. Try again later."
+    assert result.notice == "AI unavailable — used rule-based extraction."
+    assert (result.llm_calls, result.rule_based_batches, busy.calls) == (1, 3, 1)  # asked once, not per batch
+    assert (result.messages_processed, result.messages_remaining, result.requirements_created) == (3, 0, 2)
+    for m in messages:
+        db.refresh(m)
+        assert m.requirements_extracted_at is not None
+    reqs = db.query(Requirement).order_by(Requirement.number).all()
+    assert [(r.current.statement, r.sources[0].source_sentence) for r in reqs] == [(CSV, CSV), (BANGLA_OTP, BANGLA_OTP)]
+    for r in reqs:
+        assert (r.origin, r.status, r.current.version, r.current.origin) == ("ai", "suggested", 1, "ai")
+        assert (r.current.ai_model, r.current.confidence, r.current.type) == ("rule-based", 0.4, "functional")
+    assert "using rule-based extraction for the rest of the run" in caplog.text
+    assert CSV not in caplog.text and BANGLA_OTP not in caplog.text
+
+
+def test_no_llm_configured_uses_rules(db, project):
+    add_messages(db, project, f"{BANGLA_OTP} {BANGLISH_PDF}", "ok, thanks!")
+
+    result = extract_requirements(db, project, None, llm_unavailable_reason="No AI model is configured.")
+
+    assert (result.llm_calls, result.rule_based_batches, result.requirements_created) == (0, 1, 2)
+    assert (result.notice, result.ai_error) == ("AI unavailable — used rule-based extraction.", "No AI model is configured.")
+    assert {r.current.ai_model for r in db.query(Requirement).all()} == {"rule-based"}
+
+
+def test_rules_ignore_the_time_budget(db, project, monkeypatch):
+    times = itertools.chain([0.0], itertools.repeat(999.0))  # the budget is used up right after it is set
+    monkeypatch.setattr(llm_module, "clock", lambda: next(times))
+    monkeypatch.setattr(extraction, "MAX_BATCH_MESSAGES", 1)
+    add_messages(db, project, CSV, BANGLA_OTP)
+
+    result = extract_requirements(db, project, None)
+
+    assert (result.messages_processed, result.messages_remaining) == (2, 0)
+
+
+def test_rerun_with_rules_keeps_reviewed_requirements(db, project):
+    add_messages(db, project, CSV)
+    extract_requirements(db, project, None)
+    (first,) = db.query(Requirement).all()
+    first.status = "accepted"
+    db.commit()
+
+    again = extract_requirements(db, project, None, force=True)
+
+    assert again.requirements_created == 0  # the accepted one already covers that sentence
+    assert [(r.status, r.current.ai_model) for r in db.query(Requirement).all()] == [("accepted", "rule-based")]
 
 
 def test_llm_gets_thinking_level_and_run_deadline(db, project, monkeypatch):
@@ -321,7 +431,7 @@ def test_run_stops_starting_batches_when_time_is_up(db, project, monkeypatch):
     result = extract_requirements(db, project, llm)
 
     assert len(llm.calls) == 1
-    assert (result.messages_processed, result.messages_remaining, result.error) == (2, 1, None)
+    assert (result.messages_processed, result.messages_remaining, result.ai_error) == (2, 1, None)
 
 
 def test_per_run_limit(db, project, monkeypatch):

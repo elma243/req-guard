@@ -63,3 +63,14 @@ def get_llm_client() -> LLMClient:
 
 
 LLM = Annotated[LLMClient, Depends(get_llm_client)]
+
+
+def get_optional_llm_client() -> LLMClient | None:
+    """The configured LLM client, or None when no provider is set up (the caller then uses its fallback)."""
+    try:
+        return get_llm()
+    except LLMNotConfiguredError:
+        return None
+
+
+OptionalLLM = Annotated[LLMClient | None, Depends(get_optional_llm_client)]

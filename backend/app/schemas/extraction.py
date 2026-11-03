@@ -36,8 +36,13 @@ class ExtractResult(BaseModel):
     messages_processed: int = 0
     # Messages with only greetings / small talk: marked processed without asking the LLM
     messages_small_talk: int = 0
-    # Messages still waiting (over the per-run limit, or not reached because of an LLM error)
+    # Messages still waiting (over the per-run limit or the run's time budget)
     messages_remaining: int = 0
     requirements_created: int = 0
     llm_calls: int = 0
-    error: str | None = None
+    # Batches done with the rule-based fallback because no AI model answered (or none is configured)
+    rule_based_batches: int = 0
+    # "AI unavailable — used rule-based extraction." when any batch used the fallback
+    notice: str | None = None
+    # Why the AI was not used for those batches (no key, no message text)
+    ai_error: str | None = None
