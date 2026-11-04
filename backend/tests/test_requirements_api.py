@@ -7,7 +7,7 @@ import pytest
 from app.api.deps import get_optional_llm_client
 from app.core.config import settings
 from app.main import app
-from app.models import Message, Requirement, RequirementSource, RequirementVersion
+from app.models import Message, Requirement, RequirementSource, RequirementVersion, User
 from tests.fake_llm import FakeLLM
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -277,13 +277,14 @@ def test_edit_creates_new_version_and_keeps_old(client, extracted):
         "ai_model": None,
         "origin": "user",
         "created_by_id": user["id"],
+        "created_by_name": user["name"],
         "created_at": None,
     }
     first = body["versions"][0]
     assert (first["version"], first["origin"], first["statement"]) == (1, "ai", req["current"]["statement"])
     assert (first["confidence"], first["ai_model"]) == (0.92, "fake-model")
     assert body["origin"] == "ai"  # the requirement itself stays AI-found
-    assert body["sources"] == req["sources"]
+    assert [{k: v for k, v in s.items() if k != "message_text"} for s in body["sources"]] == req["sources"]
 
     detail = client.get(f"{base}/requirements/{req['id']}", headers=headers).json()
     assert [v["version"] for v in detail["versions"]] == [1, 2]
@@ -364,6 +365,85 @@ def test_merge_errors(client, extracted):
     assert client.post(url, json={"other_ids": [rid]}, headers=headers).status_code == 400
     assert client.post(url, json={"other_ids": []}, headers=headers).status_code == 422
     assert client.post(url, json={"other_ids": [999999]}, headers=headers).status_code == 404
+
+
+# ---------- version history ----------
+
+
+def test_version_history_shows_who_when_and_origin(client, extracted):
+    headers, base, user = extracted
+    req = by_code(client, headers, base)["REQ-001"]
+    url = f"{base}/requirements/{req['id']}"
+    client.patch(url, json={"statement": "Second text."}, headers=headers)
+    client.patch(url, json={"type": "functional"}, headers=headers)
+
+    detail = client.get(url, headers=headers).json()
+
+    versions = detail["versions"]
+    assert [v["version"] for v in versions] == [1, 2, 3]
+    assert [v["origin"] for v in versions] == ["ai", "user", "user"]
+    assert [v["created_by_name"] for v in versions] == [None, user["name"], user["name"]]
+    assert [v["ai_model"] for v in versions] == ["fake-model", None, None]
+    assert all(v["created_at"] for v in versions)
+    assert detail["current"]["version"] == 3
+    assert detail["version_count"] == 3
+
+
+def test_edits_never_change_older_versions(client, extracted, db_session_factory):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-001"]
+    url = f"{base}/requirements/{req['id']}"
+    first = client.patch(url, json={"statement": "Second text."}, headers=headers).json()["versions"]
+
+    after = client.patch(url, json={"statement": "Third text."}, headers=headers).json()["versions"]
+
+    assert after[:2] == first
+    assert [v["statement"] for v in after] == [req["current"]["statement"], "Second text.", "Third text."]
+    db = db_session_factory()
+    assert db.query(RequirementVersion).filter_by(requirement_id=req["id"]).count() == 3
+    db.close()
+
+
+def test_version_of_a_deleted_user_has_no_name(client, extracted, make_user, db_session_factory):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-001"]
+    url = f"{base}/requirements/{req['id']}"
+    client.patch(url, json={"statement": "Second text."}, headers=headers)
+    colleague, _ = make_user()
+    db = db_session_factory()
+    db.query(RequirementVersion).filter_by(requirement_id=req["id"], version=2).update(
+        {"created_by_id": colleague["id"]}
+    )
+    db.delete(db.get(User, colleague["id"]))
+    db.commit()
+    db.close()
+
+    version = client.get(url, headers=headers).json()["versions"][1]
+
+    assert (version["created_by_id"], version["created_by_name"], version["statement"]) == (None, None, "Second text.")
+
+
+def test_detail_has_the_full_message_and_the_list_does_not(client, extracted):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-001"]
+
+    source = client.get(f"{base}/requirements/{req['id']}", headers=headers).json()["sources"][0]
+
+    assert source["message_text"] == f"{BANGLA_OTP} {BANGLISH_PDF}"
+    assert source["source_sentence"] in source["message_text"]
+    assert "message_text" not in req["sources"][0]
+
+
+def test_merged_sources_say_where_they_came_from(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-001"]["id"]
+
+    sources = client.post(
+        f"{base}/requirements/{target}/merge", json={"other_ids": [other]}, headers=headers
+    ).json()["sources"]
+
+    assert [(s["source_sentence"], s["merged_from_id"]) for s in sources] == [(CSV_SENTENCE, None), (BANGLA_OTP, other)]
 
 
 # ---------- reject reason ----------

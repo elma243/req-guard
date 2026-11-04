@@ -29,6 +29,8 @@ class RequirementVersionOut(BaseModel):
     ai_model: str | None
     origin: Literal["ai", "user"]
     created_by_id: int | None
+    # None for AI versions and for users who were deleted
+    created_by_name: str | None
     created_at: UtcDatetime
 
 
@@ -40,6 +42,13 @@ class RequirementSourceOut(BaseModel):
     channel: str
     author: str
     sent_at: UtcDatetime
+    # The requirement this sentence came from through a merge; None for its own sentences
+    merged_from_id: int | None
+
+
+class RequirementSourceDetail(RequirementSourceOut):
+    # The whole message, to show the sentence in its context
+    message_text: str
 
 
 class RequirementOut(BaseModel):
@@ -58,6 +67,7 @@ class RequirementOut(BaseModel):
 
 
 class RequirementDetail(RequirementOut):
+    sources: list[RequirementSourceDetail]
     versions: list[RequirementVersionOut]  # oldest first
 
 

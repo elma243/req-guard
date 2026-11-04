@@ -94,6 +94,11 @@ class RequirementVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     requirement: Mapped[Requirement] = relationship(back_populates="versions")
+    created_by: Mapped["User | None"] = relationship()  # noqa: F821
+
+    @property
+    def created_by_name(self) -> str | None:
+        return self.created_by.name if self.created_by else None
 
 
 class RequirementSource(Base):

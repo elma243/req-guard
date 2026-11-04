@@ -22,6 +22,7 @@ from app.schemas.requirement import (
     RejectRequest,
     RequirementDetail,
     RequirementOut,
+    RequirementSourceDetail,
     RequirementSourceOut,
     RequirementStatus,
     RequirementType,
@@ -34,7 +35,7 @@ router = APIRouter(prefix="/projects/{project_id}/requirements", tags=["requirem
 NO_LLM_CONFIGURED = "No AI model is configured. Set GROQ_API_KEY, or LLM_MODEL and LLM_API_KEY, in backend/.env."
 
 _LOAD = (
-    selectinload(Requirement.versions),
+    selectinload(Requirement.versions).selectinload(RequirementVersion.created_by),
     selectinload(Requirement.sources).selectinload(RequirementSource.message),
 )
 
@@ -44,6 +45,18 @@ def _get(db: Session, project: Project, requirement_id: int) -> Requirement:
     if requirement is None or requirement.project_id != project.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Requirement not found")
     return requirement
+
+
+def _source(s: RequirementSource) -> dict:
+    return {
+        "message_id": s.message_id,
+        "source_sentence": s.source_sentence,
+        "source": s.message.source,
+        "channel": s.message.channel,
+        "author": s.message.author,
+        "sent_at": s.message.sent_at,
+        "merged_from_id": s.merged_from_id,
+    }
 
 
 def _out(r: Requirement) -> RequirementOut:
@@ -58,23 +71,15 @@ def _out(r: Requirement) -> RequirementOut:
         updated_at=r.updated_at,
         current=RequirementVersionOut.model_validate(r.current),
         version_count=len(r.versions),
-        sources=[
-            RequirementSourceOut(
-                message_id=s.message_id,
-                source_sentence=s.source_sentence,
-                source=s.message.source,
-                channel=s.message.channel,
-                author=s.message.author,
-                sent_at=s.message.sent_at,
-            )
-            for s in r.sources
-        ],
+        sources=[RequirementSourceOut(**_source(s)) for s in r.sources],
     )
 
 
 def _detail(r: Requirement) -> RequirementDetail:
     return RequirementDetail(
-        **_out(r).model_dump(), versions=[RequirementVersionOut.model_validate(v) for v in r.versions]
+        **_out(r).model_dump(exclude={"sources"}),
+        sources=[RequirementSourceDetail(**_source(s), message_text=s.message.text) for s in r.sources],
+        versions=[RequirementVersionOut.model_validate(v) for v in r.versions],
     )
 
 
