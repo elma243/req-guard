@@ -295,6 +295,7 @@ export type RequirementVersion = {
   ai_model: string | null; // "provider:model" or "rule-based"; null for versions written by a user
   origin: "ai" | "user";
   created_by_id: number | null;
+  created_by_name: string | null; // null for AI versions and deleted users
   created_at: string;
 };
 
@@ -305,6 +306,7 @@ export type RequirementSource = {
   channel: string;
   author: string;
   sent_at: string;
+  merged_from_id: number | null; // the requirement this sentence came from through a merge
 };
 
 export type Requirement = {
@@ -313,11 +315,31 @@ export type Requirement = {
   origin: "ai" | "user";
   status: RequirementStatus;
   merged_into_id: number | null;
+  reject_reason: string | null; // only while rejected
   created_at: string;
   updated_at: string;
   current: RequirementVersion;
   version_count: number;
   sources: RequirementSource[];
+};
+
+export type RequirementDetail = Requirement & {
+  sources: (RequirementSource & { message_text: string })[];
+  versions: RequirementVersion[]; // oldest first
+};
+
+export type RequirementUpdate = {
+  statement?: string;
+  type?: RequirementType;
+  nfr_category?: NfrCategory | null;
+};
+
+export const BULK_LIMIT = 200;
+export type BulkAction = "accept" | "reject" | "undo";
+
+export type BulkResult = {
+  updated: Requirement[];
+  skipped: { id: number; code: string; reason: string }[]; // merged, already in that status, nothing to undo
 };
 
 export type ExtractResult = {
@@ -352,4 +374,53 @@ export function listRequirements(
     if (value) params.set(key, value);
   }
   return apiFetch<Requirement[]>(`/projects/${projectId}/requirements?${params}`);
+}
+
+export function getRequirement(projectId: number | string, id: number) {
+  return apiFetch<RequirementDetail>(`/projects/${projectId}/requirements/${id}`);
+}
+
+// Saved as a new version; the older versions stay as they are
+export function editRequirement(projectId: number | string, id: number, data: RequirementUpdate) {
+  return apiFetch<RequirementDetail>(`/projects/${projectId}/requirements/${id}`, {
+    method: "PATCH",
+    body: json(data),
+  });
+}
+
+function requirementAction(projectId: number | string, id: number, action: string, body?: unknown) {
+  return apiFetch<RequirementDetail>(`/projects/${projectId}/requirements/${id}/${action}`, {
+    method: "POST",
+    body: body === undefined ? undefined : json(body),
+  });
+}
+
+export function acceptRequirement(projectId: number | string, id: number) {
+  return requirementAction(projectId, id, "accept");
+}
+
+export function rejectRequirement(projectId: number | string, id: number, reason: string) {
+  return requirementAction(projectId, id, "reject", { reason });
+}
+
+// Takes back the last accept / reject: the status returns to what it was
+export function undoRequirement(projectId: number | string, id: number) {
+  return requirementAction(projectId, id, "undo");
+}
+
+// Rejected or merged back to "suggested"
+export function restoreRequirement(projectId: number | string, id: number) {
+  return requirementAction(projectId, id, "restore");
+}
+
+// Folds `otherIds` into `id`; their source sentences are kept on it
+export function mergeRequirements(projectId: number | string, id: number, otherIds: number[]) {
+  return requirementAction(projectId, id, "merge", { other_ids: otherIds });
+}
+
+export function bulkRequirements(projectId: number | string, ids: number[], action: BulkAction, reason?: string) {
+  return apiFetch<BulkResult>(`/projects/${projectId}/requirements/bulk`, {
+    method: "POST",
+    body: json({ ids, action, reason }),
+  });
 }
