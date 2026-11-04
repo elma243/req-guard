@@ -48,6 +48,8 @@ class RequirementOut(BaseModel):
     origin: Literal["ai", "user"]
     status: RequirementStatus
     merged_into_id: int | None
+    # Only while the status is "rejected"
+    reject_reason: str | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
     current: RequirementVersionOut
@@ -72,6 +74,10 @@ class RequirementUpdate(BaseModel):
         if not self.model_fields_set:
             raise ValueError("Nothing to change")
         return self
+
+
+class RejectRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
 
 
 class MergeRequest(BaseModel):

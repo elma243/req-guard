@@ -366,6 +366,197 @@ def test_merge_errors(client, extracted):
     assert client.post(url, json={"other_ids": [999999]}, headers=headers).status_code == 404
 
 
+# ---------- reject reason ----------
+
+
+def act(client, headers, base, rid, action, **body):
+    return client.post(f"{base}/requirements/{rid}/{action}", json=body or None, headers=headers)
+
+
+def test_reject_reason_is_saved_and_optional(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+
+    with_reason = act(client, headers, base, reqs["REQ-001"]["id"], "reject", reason="  Out of scope for phase 1. ")
+    without = act(client, headers, base, reqs["REQ-002"]["id"], "reject")
+    blank = act(client, headers, base, reqs["REQ-003"]["id"], "reject", reason="   ")
+
+    assert with_reason.json()["reject_reason"] == "Out of scope for phase 1."
+    assert without.status_code == 200 and without.json()["reject_reason"] is None
+    assert blank.json()["reject_reason"] is None
+    assert by_code(client, headers, base)["REQ-001"]["reject_reason"] == "Out of scope for phase 1."
+
+
+def test_reject_reason_too_long(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+
+    assert act(client, headers, base, rid, "reject", reason="x" * 1001).status_code == 422
+    assert by_code(client, headers, base)["REQ-001"]["status"] == "suggested"
+
+
+def test_reject_reason_is_shown_only_while_rejected(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "reject", reason="Not needed")
+
+    assert act(client, headers, base, rid, "accept").json()["reject_reason"] is None
+    assert act(client, headers, base, rid, "undo").json()["reject_reason"] == "Not needed"
+    assert act(client, headers, base, rid, "restore").json()["reject_reason"] is None
+
+
+# ---------- undo ----------
+
+
+def test_undo_accept_returns_to_suggested(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "accept")
+
+    res = act(client, headers, base, rid, "undo")
+
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "suggested"
+
+
+def test_undo_returns_an_edited_requirement_to_edited(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    client.patch(f"{base}/requirements/{rid}", json={"actor": "client"}, headers=headers)
+    act(client, headers, base, rid, "accept")
+
+    body = act(client, headers, base, rid, "undo").json()
+
+    assert (body["status"], body["version_count"]) == ("edited", 2)
+
+
+def test_undo_reject_returns_to_accepted(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "accept")
+    act(client, headers, base, rid, "reject", reason="Changed our mind")
+
+    assert act(client, headers, base, rid, "undo").json()["status"] == "accepted"
+
+
+def test_undo_twice_or_without_a_review_is_refused(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+
+    assert act(client, headers, base, rid, "undo").status_code == 409
+    act(client, headers, base, rid, "accept")
+    act(client, headers, base, rid, "undo")
+    res = act(client, headers, base, rid, "undo")
+    assert res.status_code == 409 and "nothing to undo" in res.json()["detail"]
+
+
+def test_undo_cannot_jump_over_a_later_change(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    edited, target, merged = reqs["REQ-001"]["id"], reqs["REQ-002"]["id"], reqs["REQ-003"]["id"]
+    act(client, headers, base, edited, "accept")
+    client.patch(f"{base}/requirements/{edited}", json={"actor": "client"}, headers=headers)
+    act(client, headers, base, target, "accept")
+    act(client, headers, base, merged, "accept")
+    act(client, headers, base, target, "merge", other_ids=[merged])
+
+    assert act(client, headers, base, edited, "undo").status_code == 409
+    assert act(client, headers, base, target, "undo").status_code == 409
+    assert act(client, headers, base, merged, "undo").status_code == 409
+
+
+def test_repeating_a_review_keeps_the_real_previous_status(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "accept")
+    assert act(client, headers, base, rid, "accept").status_code == 200
+
+    assert act(client, headers, base, rid, "undo").json()["status"] == "suggested"
+
+
+# ---------- restore ----------
+
+
+def test_restore_rejected(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "reject", reason="No")
+
+    res = act(client, headers, base, rid, "restore")
+
+    assert res.status_code == 200, res.text
+    assert (res.json()["status"], res.json()["reject_reason"]) == ("suggested", None)
+    assert act(client, headers, base, rid, "undo").status_code == 409  # the reject is gone, not undoable
+
+
+def test_restore_is_only_for_rejected_or_merged(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+
+    assert act(client, headers, base, rid, "restore").status_code == 409
+    act(client, headers, base, rid, "accept")
+    assert act(client, headers, base, rid, "restore").status_code == 409
+    assert client.post(f"{base}/requirements/999999/restore", headers=headers).status_code == 404
+
+
+def test_restore_merged_takes_its_sentence_back_from_the_target(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-001"]["id"]
+    act(client, headers, base, target, "merge", other_ids=[other])
+
+    res = act(client, headers, base, other, "restore")
+
+    assert res.status_code == 200, res.text
+    assert (res.json()["status"], res.json()["merged_into_id"]) == ("suggested", None)
+    assert [s["source_sentence"] for s in res.json()["sources"]] == [BANGLA_OTP]
+    after = client.get(f"{base}/requirements/{target}", headers=headers).json()
+    assert [s["source_sentence"] for s in after["sources"]] == [CSV_SENTENCE]  # its own sentence is untouched
+
+
+def test_restore_merged_keeps_the_targets_own_copy_of_the_same_sentence(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-005"]["id"]  # both from the CSV sentence
+    act(client, headers, base, target, "merge", other_ids=[other])
+
+    act(client, headers, base, other, "restore")
+
+    after = client.get(f"{base}/requirements/{target}", headers=headers).json()
+    assert [s["source_sentence"] for s in after["sources"]] == [CSV_SENTENCE]
+
+
+def test_restore_keeps_a_sentence_another_merged_item_still_needs(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, first, second = reqs["REQ-002"]["id"], reqs["REQ-004"]["id"], reqs["REQ-005"]["id"]
+    act(client, headers, base, target, "merge", other_ids=[first, second])  # same CSV sentence, copied once
+
+    def sentences() -> list[str]:
+        detail = client.get(f"{base}/requirements/{target}", headers=headers).json()
+        return [s["source_sentence"] for s in detail["sources"]]
+
+    assert sentences() == [BANGLISH_PDF, CSV_SENTENCE]
+    act(client, headers, base, first, "restore")
+    assert sentences() == [BANGLISH_PDF, CSV_SENTENCE]  # REQ-005 is still merged here
+    act(client, headers, base, second, "restore")
+    assert sentences() == [BANGLISH_PDF]
+
+
+def test_restored_edit_survives_force_extract(client, extracted, llm):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    text = "The system shall ask for an OTP on the login page."
+    client.patch(f"{base}/requirements/{rid}", json={"statement": text}, headers=headers)
+    act(client, headers, base, rid, "reject")
+    act(client, headers, base, rid, "restore")
+
+    extract(client, headers, base, force=True)
+
+    after = by_code(client, headers, base)["REQ-001"]
+    assert (after["status"], after["current"]["statement"]) == ("suggested", text)
+
+
 # ---------- data and access ----------
 
 
@@ -401,9 +592,16 @@ def test_requirements_are_per_project_and_owner_only(client, extracted, make_use
     assert extract(client, stranger, base).status_code == 404
     assert client.patch(f"{base}/requirements/{rid}", json={"actor": "x"}, headers=stranger).status_code == 404
     assert client.post(f"{base}/requirements/{rid}/accept", headers=stranger).status_code == 404
+    for action in ("reject", "undo", "restore"):
+        assert client.post(f"{base}/requirements/{rid}/{action}", headers=stranger).status_code == 404
+    # The owner cannot reach it through another of their projects either
+    assert client.post(f"/projects/{other['id']}/requirements/{rid}/restore", headers=headers).status_code == 404
+    assert listed(client, headers, base)[0]["status"] == "suggested"
 
 
 def test_login_required(client, extracted):
     _, base, _ = extracted
     assert client.get(f"{base}/requirements").status_code == 401
     assert client.post(f"{base}/requirements/extract").status_code == 401
+    assert client.post(f"{base}/requirements/1/undo").status_code == 401
+    assert client.post(f"{base}/requirements/1/restore").status_code == 401
