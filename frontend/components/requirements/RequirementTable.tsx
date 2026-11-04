@@ -12,17 +12,47 @@ type TableProps = {
   compact: boolean;
   activeId: number | null;
   onOpen: (id: number) => void;
+  selected: Set<number>;
+  // Rows with a request in flight
+  busy: Set<number>;
+  onToggle: (id: number) => void;
+  onToggleAll: (on: boolean) => void;
 };
 
 const HEAD = "px-4 py-3 font-medium";
 
-export default function RequirementTable({ rows, codes, compact, activeId, onOpen }: TableProps) {
+export default function RequirementTable({
+  rows,
+  codes,
+  compact,
+  activeId,
+  onOpen,
+  selected,
+  busy,
+  onToggle,
+  onToggleAll,
+}: TableProps) {
   useEffect(() => {
     if (activeId !== null) document.getElementById(rowId(activeId))?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
 
+  const ticked = rows.filter((r) => selected.has(r.id)).length;
+
   return (
-    <TableShell compact={compact}>
+    <TableShell
+      compact={compact}
+      selectAll={
+        <input
+          type="checkbox"
+          aria-label="Select all shown requirements"
+          checked={ticked === rows.length}
+          ref={(el) => {
+            if (el) el.indeterminate = ticked > 0 && ticked < rows.length;
+          }}
+          onChange={(e) => onToggleAll(e.target.checked)}
+        />
+      }
+    >
       {rows.map((r) => (
         <Row
           key={r.id}
@@ -31,6 +61,9 @@ export default function RequirementTable({ rows, codes, compact, activeId, onOpe
           compact={compact}
           active={r.id === activeId}
           onOpen={() => onOpen(r.id)}
+          ticked={selected.has(r.id)}
+          busy={busy.has(r.id)}
+          onToggle={() => onToggle(r.id)}
         />
       ))}
     </TableShell>
@@ -44,6 +77,9 @@ export function TableSkeleton() {
     <TableShell compact={false} busy>
       {[0, 1, 2, 3, 4].map((n) => (
         <tr key={n} className="animate-pulse">
+          <td className="py-4 pl-4">
+            <div className="h-4 w-4 rounded bg-white/5" />
+          </td>
           <td className="px-4 py-4">
             <div className="h-3 w-14 rounded bg-white/10" />
           </td>
@@ -66,12 +102,23 @@ export function TableSkeleton() {
   );
 }
 
-function TableShell({ compact, busy, children }: { compact: boolean; busy?: boolean; children: React.ReactNode }) {
+function TableShell({
+  compact,
+  busy,
+  selectAll,
+  children,
+}: {
+  compact: boolean;
+  busy?: boolean;
+  selectAll?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div className="mt-4 overflow-x-auto rounded-2xl border border-white/10" aria-busy={busy}>
       <table className="w-full text-left text-sm">
         <thead className="bg-zinc-900/80 text-xs uppercase tracking-wider text-zinc-500">
           <tr>
+            <th className="w-8 py-3 pl-4">{selectAll}</th>
             <th className={`w-24 ${HEAD}`}>Code</th>
             <th className={HEAD}>Requirement and source</th>
             {!compact && <th className={`w-36 ${HEAD}`}>Type</th>}
@@ -91,12 +138,18 @@ function Row({
   compact,
   active,
   onOpen,
+  ticked,
+  busy,
+  onToggle,
 }: {
   requirement: Requirement;
   mergedInto?: string;
   compact: boolean;
   active: boolean;
   onOpen: () => void;
+  ticked: boolean;
+  busy: boolean;
+  onToggle: () => void;
 }) {
   const v = r.current;
   const closed = r.status === "rejected" || r.status === "merged";
@@ -104,11 +157,15 @@ function Row({
     <tr
       id={rowId(r.id)}
       aria-current={active ? "true" : undefined}
+      aria-busy={busy}
       onClick={onOpen}
       className={`cursor-pointer scroll-my-2 align-top transition hover:bg-white/[0.03] ${
         active ? "bg-indigo-500/10 shadow-[inset_2px_0_0_0_rgb(129_140_248)] hover:bg-indigo-500/10" : ""
-      } ${closed ? "opacity-70" : ""}`}
+      } ${busy ? "pointer-events-none opacity-40" : closed ? "opacity-70" : ""}`}
     >
+      <td className="py-3 pl-4" onClick={(e) => e.stopPropagation()}>
+        <input type="checkbox" aria-label={`Select ${r.code}`} checked={ticked} onChange={onToggle} />
+      </td>
       <td className="whitespace-nowrap px-4 py-3">
         <button
           type="button"
