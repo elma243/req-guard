@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.api.deps import get_llm_client
+from app.api.deps import get_optional_llm_client
 from app.core.config import settings
 from app.main import app
 from app.models import Message, Requirement, RequirementSource, RequirementVersion
@@ -19,7 +19,7 @@ CSV_SENTENCE = "Admin should be able to export all orders as CSV."
 @pytest.fixture
 def llm():
     fake = FakeLLM()
-    app.dependency_overrides[get_llm_client] = lambda: fake
+    app.dependency_overrides[get_optional_llm_client] = lambda: fake
     return fake
 
 
@@ -70,7 +70,9 @@ def test_extract_mixed_language_chat(client, owner, llm):
         "messages_remaining": 0,
         "requirements_created": 5,
         "llm_calls": 1,
-        "error": None,
+        "rule_based_batches": 0,
+        "notice": None,
+        "ai_error": None,
     }
     sent = llm.sentences_sent
     assert BANGLA_OTP in sent and BANGLISH_PDF in sent and "Kalke meeting ta 3 tay hobe?" in sent
@@ -87,6 +89,7 @@ def test_extract_mixed_language_chat(client, owner, llm):
         "security",
         0.92,
     )
+    assert otp["current"]["ai_model"] == "fake-model"  # the model that answered is shown with each requirement
     assert (pdf["current"]["type"], pdf["current"]["nfr_category"]) == ("functional", None)
     assert load["current"]["nfr_category"] == "performance"
 
@@ -165,43 +168,43 @@ def test_extract_only_chosen_messages(client, extracted, llm):
     assert sorted(by_code(client, headers, base)) == ["REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007"]
 
 
-def test_llm_not_configured_is_503_with_names_only(client, owner, monkeypatch):
+def test_llm_not_configured_uses_rules(client, owner, monkeypatch):
     headers, base, _ = owner
-    monkeypatch.setattr(settings, "llm_provider", None)
+    monkeypatch.setattr(settings, "llm_chain", "groq,gemini")
+    monkeypatch.setattr(settings, "groq_api_key", None)
     monkeypatch.setattr(settings, "llm_model", None)
     monkeypatch.setattr(settings, "llm_api_key", None)
 
     res = extract(client, headers, base)
 
-    assert res.status_code == 503
-    assert "LLM_PROVIDER" in res.json()["detail"] and "LLM_API_KEY" in res.json()["detail"]
+    assert res.status_code == 200
+    body = res.json()
+    assert (body["notice"], body["llm_calls"], body["messages_remaining"]) == (
+        "AI unavailable — used rule-based extraction.",
+        0,
+        0,
+    )
+    assert "GROQ_API_KEY" in body["ai_error"]
+    items = listed(client, headers, base)
+    assert body["requirements_created"] == len(items) > 0
+    assert {r["current"]["ai_model"] for r in items} == {"rule-based"}
+    # Each one is the client's own sentence, Bangla and Banglish included
+    assert all(r["current"]["statement"] == r["sources"][0]["source_sentence"] for r in items)
+    assert {BANGLA_OTP, BANGLISH_PDF, CSV_SENTENCE} <= {r["current"]["statement"] for r in items}
 
 
-def test_llm_error_with_partial_progress(client, owner):
+def test_llm_error_falls_back_to_rules(client, owner):
     headers, base, _ = owner
-    app.dependency_overrides[get_llm_client] = lambda: FakeLLM(fail_on_call=1)
+    app.dependency_overrides[get_optional_llm_client] = lambda: FakeLLM(fail_on_call=1)
 
     body = extract(client, headers, base).json()
 
-    # Small-talk messages need no LLM and are done; the 4 others stay waiting
-    assert (body["messages_processed"], body["messages_remaining"], body["requirements_created"]) == (4, 4, 0)
-    assert "invalid answer" in body["error"]
-    assert listed(client, headers, base) == []
-
-
-def test_llm_error_before_any_progress_is_502(client, make_user):
-    _, headers = make_user()
-    base = f"/projects/{client.post('/projects', json={'name': 'P'}, headers=headers).json()['id']}"
-    notes = f"Date: 2026-10-20\n\n{CSV_SENTENCE}\n".encode()
-    client.post(f"{base}/uploads", files=[("files", ("notes.md", notes, "text/markdown"))], headers=headers)
-    app.dependency_overrides[get_llm_client] = lambda: FakeLLM(fail_on_call=1)
-
-    res = extract(client, headers, base)
-
-    assert res.status_code == 502
-    assert "invalid answer" in res.json()["detail"]
-    app.dependency_overrides[get_llm_client] = lambda: FakeLLM()
-    assert extract(client, headers, base).json()["requirements_created"] == 2
+    assert (body["messages_processed"], body["messages_remaining"], body["rule_based_batches"]) == (8, 0, 1)
+    assert body["notice"] == "AI unavailable — used rule-based extraction."
+    assert "invalid answer" in body["ai_error"]
+    items = listed(client, headers, base)
+    assert body["requirements_created"] == len(items) > 0
+    assert all((r["status"], r["current"]["ai_model"], r["current"]["confidence"]) == ("suggested", "rule-based", 0.4) for r in items)
 
 
 # ---------- edit ----------
@@ -227,13 +230,14 @@ def test_edit_creates_new_version_and_keeps_old(client, extracted):
         "nfr_category": None,
         "actor": "user",
         "confidence": None,
+        "ai_model": None,
         "origin": "user",
         "created_by_id": user["id"],
         "created_at": None,
     }
     first = body["versions"][0]
     assert (first["version"], first["origin"], first["statement"]) == (1, "ai", req["current"]["statement"])
-    assert first["confidence"] == 0.92
+    assert (first["confidence"], first["ai_model"]) == (0.92, "fake-model")
     assert body["origin"] == "ai"  # the requirement itself stays AI-found
     assert body["sources"] == req["sources"]
 

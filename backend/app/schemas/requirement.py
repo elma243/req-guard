@@ -25,6 +25,8 @@ class RequirementVersionOut(BaseModel):
     nfr_category: NfrCategory | None
     actor: str
     confidence: float | None
+    # provider:model that wrote this version, or "rule-based"; None for versions written by a user
+    ai_model: str | None
     origin: Literal["ai", "user"]
     created_by_id: int | None
     created_at: UtcDatetime

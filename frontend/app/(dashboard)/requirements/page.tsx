@@ -4,8 +4,14 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import NoProjectSelected from "@/components/NoProjectSelected";
 import SourceBadge from "@/components/SourceBadge";
-import { ErrorBanner, errorText } from "@/components/ui";
-import { listRequirements, type Requirement, type RequirementStatus } from "@/lib/api";
+import { ErrorBanner, NoticeBanner, errorText } from "@/components/ui";
+import {
+  RULE_BASED_MODEL,
+  RULE_BASED_NOTICE,
+  listRequirements,
+  type Requirement,
+  type RequirementStatus,
+} from "@/lib/api";
 import { useSelectedProject } from "@/lib/selectedProject";
 
 // Simple read-only list; the full review screen (accept / edit / reject / merge, versions) is Step 6.
@@ -64,6 +70,14 @@ function RequirementsView({ projectId }: { projectId: string }) {
           <ErrorBanner message={result.error} />
         </div>
       )}
+      {data?.some((r) => r.current.ai_model === RULE_BASED_MODEL) && (
+        <div className="mt-6">
+          <NoticeBanner
+            message={RULE_BASED_NOTICE}
+            detail="Requirements marked “Rule-based” are the client's own sentences, found by cue words. Review them, or extract again when the AI is back."
+          />
+        </div>
+      )}
 
       <div className="mt-6 overflow-x-auto rounded-2xl border border-white/10">
         <table className="w-full text-left text-sm">
@@ -72,7 +86,7 @@ function RequirementsView({ projectId }: { projectId: string }) {
               <th className="w-24 px-4 py-3 font-medium">Code</th>
               <th className="px-4 py-3 font-medium">Requirement and source</th>
               <th className="w-40 px-4 py-3 font-medium">Type</th>
-              <th className="w-28 px-4 py-3 font-medium">Confidence</th>
+              <th className="w-36 px-4 py-3 font-medium">Confidence</th>
               <th className="w-32 px-4 py-3 font-medium">Status</th>
             </tr>
           </thead>
@@ -142,6 +156,15 @@ function RequirementRow({ requirement: r }: { requirement: Requirement }) {
       </td>
       <td className="px-4 py-3 text-zinc-300 tabular-nums">
         {v.confidence === null ? <span className="text-zinc-600">—</span> : `${Math.round(v.confidence * 100)}%`}
+        {v.ai_model === RULE_BASED_MODEL ? (
+          <p className="mt-1">
+            <span className="whitespace-nowrap rounded-full bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-300 ring-1 ring-amber-400/30">
+              Rule-based
+            </span>
+          </p>
+        ) : (
+          v.ai_model && <p className="mt-0.5 break-all text-xs text-zinc-500">{v.ai_model}</p>
+        )}
       </td>
       <td className="px-4 py-3">
         <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${STATUS_STYLE[r.status]}`}>

@@ -292,6 +292,7 @@ export type RequirementVersion = {
   nfr_category: NfrCategory | null;
   actor: string;
   confidence: number | null; // AI confidence 0-1; null for versions written by a user
+  ai_model: string | null; // "provider:model" or "rule-based"; null for versions written by a user
   origin: "ai" | "user";
   created_by_id: number | null;
   created_at: string;
@@ -325,8 +326,14 @@ export type ExtractResult = {
   messages_remaining: number;
   requirements_created: number;
   llm_calls: number;
-  error: string | null;
+  rule_based_batches: number; // batches done with cue-word rules because no AI model answered
+  notice: string | null; // "AI unavailable — used rule-based extraction." when rules were used
+  ai_error: string | null; // why the AI was not used
 };
+
+// ai_model of requirements found by the rule-based fallback (text = the client's sentence)
+export const RULE_BASED_MODEL = "rule-based";
+export const RULE_BASED_NOTICE = "AI unavailable — used rule-based extraction.";
 
 // Reads messages not processed yet; force=true reads all again (only untouched AI suggestions are replaced)
 export function extractRequirements(projectId: number | string, options: { force?: boolean } = {}) {

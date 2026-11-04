@@ -27,6 +27,17 @@ export function ErrorBanner({ message }: { message: string }) {
   );
 }
 
+// A warning that is not an error, e.g. "AI unavailable — used rule-based extraction."
+export function NoticeBanner({ message, detail }: { message: string; detail?: string | null }) {
+  if (!message) return null;
+  return (
+    <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-2.5 text-sm text-amber-200">
+      <p>{message}</p>
+      {detail && <p className="mt-1 text-xs text-amber-200/70">{detail}</p>}
+    </div>
+  );
+}
+
 export function errorText(err: unknown) {
   return err instanceof Error ? err.message : "Something went wrong.";
 }

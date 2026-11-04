@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import NoProjectSelected from "@/components/NoProjectSelected";
 import SourceBadge, { sourceLabel } from "@/components/SourceBadge";
-import { ErrorBanner, errorText, inputClass, primaryButton, secondaryButton } from "@/components/ui";
+import { ErrorBanner, NoticeBanner, errorText, inputClass, primaryButton, secondaryButton } from "@/components/ui";
 import {
   MESSAGE_SOURCES,
   deleteMessage,
@@ -366,9 +366,9 @@ function ExtractRequirements({ projectId }: { projectId: string }) {
       )}
       {result && (
         <div className="mt-3 space-y-2">
-          {result.error && <ErrorBanner message={`Stopped early: ${result.error}`} />}
+          {result.notice && <NoticeBanner message={result.notice} detail={result.ai_error} />}
           <p className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3.5 py-2.5 text-sm text-emerald-200">
-            {result.messages_processed === 0 && !result.error ? (
+            {result.messages_processed === 0 ? (
               "No new messages to read. Tick “Include already processed messages” to read them again."
             ) : (
               <>

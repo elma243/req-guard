@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import LLM, CurrentUser, DbSession, OwnedProject
+from app.api.deps import CurrentUser, DbSession, OptionalLLM, OwnedProject
 from app.models import Project, Requirement, RequirementSource, RequirementVersion
 from app.nlp.extraction import extract_requirements
 from app.schemas.extraction import ExtractResult
@@ -23,6 +23,8 @@ from app.schemas.requirement import (
 )
 
 router = APIRouter(prefix="/projects/{project_id}/requirements", tags=["requirements"])
+
+NO_LLM_CONFIGURED = "No AI model is configured. Set GROQ_API_KEY, or LLM_MODEL and LLM_API_KEY, in backend/.env."
 
 _LOAD = (
     selectinload(Requirement.versions),
@@ -79,13 +81,22 @@ def _ensure_changeable(requirement: Requirement, *, editing: bool) -> None:
 
 
 @router.post("/extract", response_model=ExtractResult)
-def extract(project: OwnedProject, db: DbSession, llm: LLM, body: ExtractRequest | None = None) -> ExtractResult:
-    """Extract requirements from messages not read yet (or again, with force / message_ids)."""
+def extract(
+    project: OwnedProject, db: DbSession, llm: OptionalLLM, body: ExtractRequest | None = None
+) -> ExtractResult:
+    """Extract requirements from messages not read yet (or again, with force / message_ids).
+
+    Always gives a result: without a configured or answering AI model the rule-based fallback is used.
+    """
     body = body or ExtractRequest()
-    result = extract_requirements(db, project, llm, force=body.force, message_ids=body.message_ids)
-    if result.error and result.messages_processed == 0:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=result.error)
-    return result
+    return extract_requirements(
+        db,
+        project,
+        llm,
+        force=body.force,
+        message_ids=body.message_ids,
+        llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
+    )
 
 
 @router.get("", response_model=list[RequirementOut])

@@ -55,6 +55,7 @@ docs/
 10. Client messages may be in English, Bangla (Bengali script) or Banglish (Bangla written in Latin letters), often mixed in one message. Store message text exactly as received. Extracted requirements are written in English, and each keeps the original source sentence unchanged. Analysed repositories: Python only.
 
 11. Never add "Co-Authored-By" or any AI attribution lines to commit messages.
+12. **Row level security**: every migration that creates a table also runs `ALTER TABLE <name> ENABLE ROW LEVEL SECURITY` (Supabase exposes tables without RLS through its public API). Guard it with `if op.get_bind().dialect.name == "postgresql":` because SQLite has no RLS.
 
 ## Commands
 - Backend: `cd backend && uvicorn app.main:app --reload` · tests: `cd backend && pytest -q` · migrations: `alembic revision --autogenerate -m "..." && alembic upgrade head`

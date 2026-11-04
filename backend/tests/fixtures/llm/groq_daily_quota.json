@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_test` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199616, Requested 2405. Please try again in 14m33.6s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+    "type": "tokens",
+    "code": "rate_limit_exceeded"
+  }
+}
