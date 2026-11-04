@@ -557,6 +557,87 @@ def test_restored_edit_survives_force_extract(client, extracted, llm):
     assert (after["status"], after["current"]["statement"]) == ("suggested", text)
 
 
+# ---------- bulk ----------
+
+
+def bulk(client, headers, base, ids, action, **extra):
+    return client.post(f"{base}/requirements/bulk", json={"ids": ids, "action": action, **extra}, headers=headers)
+
+
+def test_bulk_accept(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    ids = [reqs["REQ-001"]["id"], reqs["REQ-002"]["id"], reqs["REQ-001"]["id"]]  # a repeated id counts once
+
+    res = bulk(client, headers, base, ids, "accept")
+
+    assert res.status_code == 200, res.text
+    assert [r["code"] for r in res.json()["updated"]] == ["REQ-001", "REQ-002"]
+    assert res.json()["skipped"] == []
+    assert [r["code"] for r in listed(client, headers, base, status="accepted")] == ["REQ-001", "REQ-002"]
+
+
+def test_bulk_reject_uses_one_reason(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    ids = [reqs["REQ-001"]["id"], reqs["REQ-002"]["id"]]
+
+    body = bulk(client, headers, base, ids, "reject", reason="Phase 2").json()
+
+    assert [(r["status"], r["reject_reason"]) for r in body["updated"]] == [("rejected", "Phase 2")] * 2
+
+
+def test_bulk_undo_returns_each_to_its_own_status(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    plain, edited = reqs["REQ-001"]["id"], reqs["REQ-002"]["id"]
+    client.patch(f"{base}/requirements/{edited}", json={"actor": "client"}, headers=headers)
+    bulk(client, headers, base, [plain, edited], "accept")
+
+    body = bulk(client, headers, base, [plain, edited], "undo").json()
+
+    assert [r["status"] for r in body["updated"]] == ["suggested", "edited"]
+
+
+def test_bulk_skips_and_reports_what_it_cannot_change(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    fresh, done, merged = reqs["REQ-001"]["id"], reqs["REQ-002"]["id"], reqs["REQ-005"]["id"]
+    act(client, headers, base, done, "accept")
+    act(client, headers, base, reqs["REQ-004"]["id"], "merge", other_ids=[merged])
+
+    body = bulk(client, headers, base, [fresh, done, merged], "accept").json()
+
+    assert [r["code"] for r in body["updated"]] == ["REQ-001"]
+    assert [(s["code"], s["reason"]) for s in body["skipped"]] == [
+        ("REQ-002", "Already accepted"),
+        ("REQ-005", "REQ-005 was merged into another requirement"),
+    ]
+
+    undone = bulk(client, headers, base, [reqs["REQ-003"]["id"]], "undo").json()
+    assert undone["updated"] == [] and undone["skipped"][0]["reason"] == "REQ-003 has nothing to undo"
+
+
+def test_bulk_with_an_unknown_id_changes_nothing(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    other = client.post("/projects", json={"name": "Other"}, headers=headers).json()
+
+    assert bulk(client, headers, base, [rid, 999999], "accept").status_code == 404
+    assert bulk(client, headers, f"/projects/{other['id']}", [rid], "accept").status_code == 404
+    assert by_code(client, headers, base)["REQ-001"]["status"] == "suggested"
+
+
+def test_bulk_validation(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+
+    assert bulk(client, headers, base, [], "accept").status_code == 422
+    assert bulk(client, headers, base, list(range(1, 202)), "accept").status_code == 422
+    assert bulk(client, headers, base, [rid], "merge").status_code == 422
+    assert bulk(client, headers, base, [rid], "reject", reason="x" * 1001).status_code == 422
+
+
 # ---------- data and access ----------
 
 
@@ -596,6 +677,7 @@ def test_requirements_are_per_project_and_owner_only(client, extracted, make_use
         assert client.post(f"{base}/requirements/{rid}/{action}", headers=stranger).status_code == 404
     # The owner cannot reach it through another of their projects either
     assert client.post(f"/projects/{other['id']}/requirements/{rid}/restore", headers=headers).status_code == 404
+    assert bulk(client, stranger, base, [rid], "accept").status_code == 404
     assert listed(client, headers, base)[0]["status"] == "suggested"
 
 
@@ -605,3 +687,4 @@ def test_login_required(client, extracted):
     assert client.post(f"{base}/requirements/extract").status_code == 401
     assert client.post(f"{base}/requirements/1/undo").status_code == 401
     assert client.post(f"{base}/requirements/1/restore").status_code == 401
+    assert client.post(f"{base}/requirements/bulk", json={"ids": [1], "action": "accept"}).status_code == 401

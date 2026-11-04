@@ -83,3 +83,21 @@ class RejectRequest(BaseModel):
 class MergeRequest(BaseModel):
     # Requirements folded into this one; their source sentences are added to it
     other_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class BulkRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=200)
+    action: Literal["accept", "reject", "undo"]
+    # Only for "reject"; the same reason for all of them
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
+
+
+class BulkSkipped(BaseModel):
+    id: int
+    code: str
+    reason: str
+
+
+class BulkResult(BaseModel):
+    updated: list[RequirementOut]
+    skipped: list[BulkSkipped]

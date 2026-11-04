@@ -14,6 +14,9 @@ from app.models import Project, Requirement, RequirementSource, RequirementVersi
 from app.nlp.extraction import extract_requirements
 from app.schemas.extraction import ExtractResult
 from app.schemas.requirement import (
+    BulkRequest,
+    BulkResult,
+    BulkSkipped,
     ExtractRequest,
     MergeRequest,
     RejectRequest,
@@ -102,6 +105,43 @@ def extract(
         message_ids=body.message_ids,
         llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
     )
+
+
+@router.post("/bulk", response_model=BulkResult)
+def bulk_review(body: BulkRequest, project: OwnedProject, db: DbSession) -> BulkResult:
+    """Accept, reject or undo many at once, in one transaction.
+
+    An id outside this project fails the whole call and changes nothing. A requirement the action does not
+    apply to (merged, already in that status, nothing to undo) is skipped and reported.
+    """
+    ids = list(dict.fromkeys(body.ids))
+    found = {
+        r.id: r
+        for r in db.scalars(
+            select(Requirement).where(Requirement.project_id == project.id, Requirement.id.in_(ids)).options(*_LOAD)
+        ).all()
+    }
+    if len(found) != len(ids):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Requirement not found")
+
+    new_status = {"accept": "accepted", "reject": "rejected"}.get(body.action)
+    updated: list[Requirement] = []
+    skipped: list[BulkSkipped] = []
+    for requirement in (found[rid] for rid in ids):
+        if requirement.status == new_status:
+            skipped.append(BulkSkipped(id=requirement.id, code=requirement.code, reason=f"Already {new_status}"))
+            continue
+        try:
+            if new_status:
+                _review(requirement, new_status, body.reason)
+            else:
+                _undo(requirement)
+        except HTTPException as exc:
+            skipped.append(BulkSkipped(id=requirement.id, code=requirement.code, reason=exc.detail))
+        else:
+            updated.append(requirement)
+    db.commit()
+    return BulkResult(updated=[_out(_get(db, project, r.id)) for r in updated], skipped=skipped)
 
 
 @router.get("", response_model=list[RequirementOut])
