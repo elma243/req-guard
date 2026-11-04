@@ -156,6 +156,50 @@ def test_force_replaces_only_untouched_ai_suggestions(client, extracted, llm, db
     assert after["REQ-006"]["sources"][0]["source_sentence"] == CSV_SENTENCE
 
 
+def set_status(db_session_factory, requirement_id: int, status: str) -> None:
+    db = db_session_factory()
+    db.get(Requirement, requirement_id).status = status
+    db.commit()
+    db.close()
+
+
+def test_force_keeps_suggested_item_with_a_user_version(client, extracted, llm, db_session_factory):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-001"]
+    text = "The system shall ask for an OTP on the login page."
+    client.patch(f"{base}/requirements/{req['id']}", json={"statement": text}, headers=headers)
+    set_status(db_session_factory, req["id"], "suggested")  # what restore and undo can do
+
+    extract(client, headers, base, force=True)
+
+    after = by_code(client, headers, base)["REQ-001"]
+    assert (after["status"], after["current"]["statement"], after["version_count"]) == ("suggested", text, 2)
+
+
+def test_force_keeps_the_target_of_a_merge(client, extracted, llm):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-005"]["id"]
+    assert client.post(f"{base}/requirements/{target}/merge", json={"other_ids": [other]}, headers=headers).status_code == 200
+
+    extract(client, headers, base, force=True)
+
+    after = by_code(client, headers, base)
+    assert after["REQ-004"]["status"] == "suggested"
+    assert (after["REQ-005"]["status"], after["REQ-005"]["merged_into_id"]) == ("merged", target)
+
+
+def test_force_still_replaces_a_plain_ai_suggestion(client, extracted, llm, db_session_factory):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-002"]
+    client.post(f"{base}/requirements/{req['id']}/accept", headers=headers)
+    set_status(db_session_factory, req["id"], "suggested")  # AI text only: nothing of a user's is lost
+
+    extract(client, headers, base, force=True)
+
+    assert "REQ-002" not in by_code(client, headers, base)
+
+
 def test_extract_only_chosen_messages(client, extracted, llm):
     headers, base, _ = extracted
     otp_message = by_code(client, headers, base)["REQ-001"]["sources"][0]["message_id"]

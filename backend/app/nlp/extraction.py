@@ -15,6 +15,8 @@ or "লাগবে" becomes one suggestion whose text is the source sentence it
 
 Messages are read once. A re-run (force=True or chosen message ids) only replaces AI suggestions that are
 still "suggested"; accepted, edited, rejected, merged and user-created requirements are never touched (rule 2).
+A "suggested" item is also kept when a user wrote one of its versions (edited, then restored) or merged other
+requirements into it: both hold a human decision.
 """
 
 import logging
@@ -255,7 +257,10 @@ def _source_key(sources) -> frozenset[tuple[int, str]]:
 
 
 def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> None:
-    """Delete AI suggestions (still "suggested") that come only from these messages, before re-extracting them."""
+    """Delete untouched AI suggestions that come only from these messages, before re-extracting them.
+
+    Status alone does not prove "untouched": restore and undo can bring an item back to "suggested".
+    """
     if not message_ids:
         return
     candidates = db.scalars(
@@ -269,7 +274,12 @@ def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> 
         )
         .distinct()
     ).all()
+    merge_targets = set(
+        db.scalars(select(Requirement.merged_into_id).where(Requirement.project_id == project_id)).all()
+    )
     for requirement in candidates:
+        if requirement.id in merge_targets or any(v.origin == "user" for v in requirement.versions):
+            continue
         if all(s.message_id in message_ids for s in requirement.sources):
             db.delete(requirement)
     db.flush()
