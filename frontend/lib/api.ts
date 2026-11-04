@@ -323,7 +323,7 @@ export type Requirement = {
   sources: RequirementSource[];
 };
 
-export type RequirementDetail = Requirement & {
+export type RequirementDetail = Omit<Requirement, "sources"> & {
   sources: (RequirementSource & { message_text: string })[];
   versions: RequirementVersion[]; // oldest first
 };

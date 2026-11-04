@@ -8,14 +8,19 @@ import {
   REQUIREMENT_STATUSES,
   RULE_BASED_MODEL,
   RULE_BASED_NOTICE,
+  getRequirement,
   listRequirements,
   type Requirement,
   type RequirementStatus,
   type RequirementType,
 } from "@/lib/api";
+import RequirementPanel, { type DetailState } from "./RequirementPanel";
 import RequirementTable, { TableSkeleton } from "./RequirementTable";
 
 type StatusFilter = RequirementStatus | "all";
+
+// Moving quickly through rows only loads the one you stop on
+const DETAIL_DELAY_MS = 120;
 
 // The whole project is loaded once, so filters answer instantly and each status can show its count
 function matches(r: Requirement, type: RequirementType | "", source: string, query: string) {
@@ -39,6 +44,12 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   const [typeFilter, setTypeFilter] = useState<RequirementType | "">("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [search, setSearch] = useState("");
+
+  // The row the keyboard and the panel work on
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [detail, setDetail] = useState<(NonNullable<DetailState> & { id: number }) | null>(null);
+  const [detailReload, setDetailReload] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +84,38 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
 
   const otherFilters = Boolean(typeFilter || sourceFilter || query);
 
+  // Filtered out = no active row, so nothing can act on a requirement you cannot see
+  const active = visible.find((r) => r.id === activeId) ?? null;
+  const panelId = panelOpen && active ? active.id : null;
+  const mergedHere = useMemo(
+    () => (data ?? []).filter((r) => panelId !== null && r.merged_into_id === panelId),
+    [data, panelId],
+  );
+
+  useEffect(() => {
+    if (panelId === null) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      getRequirement(projectId, panelId)
+        .then((data) => !cancelled && setDetail({ id: panelId, data }))
+        .catch((err) => !cancelled && setDetail({ id: panelId, error: errorText(err) }));
+    }, DETAIL_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [projectId, panelId, detailReload]);
+
+  function open(id: number) {
+    setActiveId(id);
+    setPanelOpen(true);
+  }
+
+  function retryDetail() {
+    setDetail(null);
+    setDetailReload((n) => n + 1);
+  }
+
   function clearFilters() {
     setStatusFilter("all");
     setTypeFilter("");
@@ -86,7 +129,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="max-w-6xl">
+    // Beside the open panel the list uses the free width instead of the usual page width
+    <div className={panelId === null ? "max-w-6xl" : "lg:pr-[27.5rem]"}>
       {result?.error && (
         <div className="mt-6 space-y-3">
           <ErrorBanner message={`Could not load requirements: ${result.error}`} />
@@ -169,13 +213,26 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
           </EmptyState>
         )
       )}
-      {visible.length > 0 && <RequirementTable rows={visible} codes={codes} compact={false} />}
+      {visible.length > 0 && (
+        <RequirementTable rows={visible} codes={codes} compact={panelId !== null} activeId={active?.id ?? null} onOpen={open} />
+      )}
 
       {data && data.length > 0 && (
         <p className="mt-4 text-sm text-zinc-500 tabular-nums">
           Showing {visible.length} of {data.length} · {data.filter((r) => r.status === "suggested").length} waiting for
           review
         </p>
+      )}
+
+      {active && panelId !== null && (
+        <RequirementPanel
+          requirement={active}
+          detail={detail?.id === panelId ? detail : null}
+          codes={codes}
+          mergedHere={mergedHere}
+          onRetry={retryDetail}
+          onClose={() => setPanelOpen(false)}
+        />
       )}
     </div>
   );

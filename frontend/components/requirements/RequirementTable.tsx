@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import type { Requirement } from "@/lib/api";
 import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
 
@@ -9,19 +10,34 @@ type TableProps = {
   codes: Map<number, string>;
   // The panel beside the table is open: Type and Confidence move under the statement
   compact: boolean;
+  activeId: number | null;
+  onOpen: (id: number) => void;
 };
 
 const HEAD = "px-4 py-3 font-medium";
 
-export default function RequirementTable({ rows, codes, compact }: TableProps) {
+export default function RequirementTable({ rows, codes, compact, activeId, onOpen }: TableProps) {
+  useEffect(() => {
+    if (activeId !== null) document.getElementById(rowId(activeId))?.scrollIntoView({ block: "nearest" });
+  }, [activeId]);
+
   return (
     <TableShell compact={compact}>
       {rows.map((r) => (
-        <Row key={r.id} requirement={r} mergedInto={r.merged_into_id ? codes.get(r.merged_into_id) : undefined} compact={compact} />
+        <Row
+          key={r.id}
+          requirement={r}
+          mergedInto={r.merged_into_id ? codes.get(r.merged_into_id) : undefined}
+          compact={compact}
+          active={r.id === activeId}
+          onOpen={() => onOpen(r.id)}
+        />
       ))}
     </TableShell>
   );
 }
+
+const rowId = (id: number) => `requirement-${id}`;
 
 export function TableSkeleton() {
   return (
@@ -73,16 +89,38 @@ function Row({
   requirement: r,
   mergedInto,
   compact,
+  active,
+  onOpen,
 }: {
   requirement: Requirement;
   mergedInto?: string;
   compact: boolean;
+  active: boolean;
+  onOpen: () => void;
 }) {
   const v = r.current;
   const closed = r.status === "rejected" || r.status === "merged";
   return (
-    <tr className={`align-top ${closed ? "opacity-70" : ""}`}>
-      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-zinc-300">{r.code}</td>
+    <tr
+      id={rowId(r.id)}
+      aria-current={active ? "true" : undefined}
+      onClick={onOpen}
+      className={`cursor-pointer scroll-my-2 align-top transition hover:bg-white/[0.03] ${
+        active ? "bg-indigo-500/10 shadow-[inset_2px_0_0_0_rgb(129_140_248)] hover:bg-indigo-500/10" : ""
+      } ${closed ? "opacity-70" : ""}`}
+    >
+      <td className="whitespace-nowrap px-4 py-3">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
+          className="rounded font-mono text-xs text-zinc-300 hover:text-indigo-200"
+        >
+          {r.code}
+        </button>
+      </td>
       <td className="px-4 py-3">
         <p className="text-zinc-100">{v.statement}</p>
         {compact && (
