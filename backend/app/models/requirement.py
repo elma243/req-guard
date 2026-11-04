@@ -37,6 +37,10 @@ class Requirement(Base):
     origin: Mapped[str] = mapped_column(String(10))
     status: Mapped[str] = mapped_column(String(20), default="suggested")
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("requirements.id", ondelete="SET NULL"))
+    # Why it was rejected (optional). Kept through accept and undo, so undoing brings the reason back
+    reject_reason: Mapped[str | None] = mapped_column(Text)
+    # The status before the last accept / reject, which undo returns to. None when there is nothing to undo
+    previous_status: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -53,6 +57,7 @@ class Requirement(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="RequirementSource.id",
+        foreign_keys="RequirementSource.requirement_id",
     )
 
     @property
@@ -100,6 +105,9 @@ class RequirementSource(Base):
     requirement_id: Mapped[int] = mapped_column(ForeignKey("requirements.id", ondelete="CASCADE"), index=True)
     message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
     source_sentence: Mapped[str] = mapped_column(Text)
+    # The requirement this row was copied from by a merge; None for the requirement's own sources.
+    # Restoring that requirement removes the copy again.
+    merged_from_id: Mapped[int | None] = mapped_column(ForeignKey("requirements.id", ondelete="SET NULL"))
 
-    requirement: Mapped[Requirement] = relationship(back_populates="sources")
+    requirement: Mapped[Requirement] = relationship(back_populates="sources", foreign_keys=[requirement_id])
     message: Mapped["Message"] = relationship()  # noqa: F821

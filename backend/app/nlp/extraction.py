@@ -260,7 +260,7 @@ def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> 
         return
     candidates = db.scalars(
         select(Requirement)
-        .join(RequirementSource)
+        .join(Requirement.sources)
         .where(
             Requirement.project_id == project_id,
             Requirement.origin == "ai",
@@ -279,7 +279,7 @@ def _kept_sources(db: Session, project_id: int, message_ids: set[int]) -> Counte
     """How many kept requirements have each exact set of sources, for the given messages."""
     requirements = db.scalars(
         select(Requirement)
-        .join(RequirementSource)
+        .join(Requirement.sources)
         .where(Requirement.project_id == project_id, RequirementSource.message_id.in_(message_ids))
         .distinct()
     ).all()
