@@ -171,8 +171,9 @@ def check_missing_info(item: RequirementInput) -> list[Draft]:
 NAME_WEIGHT = 0.6
 DESCRIPTION_WEIGHT = 0.4
 DESCRIPTION_WORDS = 3
-# One word of a one- or two-word name is a match (0.6, 0.3); so are two description words (0.27), but not one (0.13)
-MODULE_MATCH = 0.25
+# One word of the name or of the description is a match (0.13 at least): the description is a list of the words
+# clients use, so "pay by bKash" fits a module that lists bKash
+MODULE_MATCH = 0.1
 # Share of the statement's words the scope text must contain
 SCOPE_COVERAGE = 0.3
 

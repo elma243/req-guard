@@ -294,8 +294,14 @@ def test_best_module_wins_and_has_a_score():
     assert 0.6 < score <= 1
 
 
-def test_one_description_word_is_not_a_match():
-    assert best_module(RequirementInput("The system shall list every courier.", modules=MODULES)) is None
+def test_one_description_word_is_a_match():
+    # The description lists the words clients use
+    assert best_module(RequirementInput("The system shall list every courier.", modules=MODULES))[0] == "Order Tracking"
+
+
+def test_pay_by_bkash_fits_a_module_that_lists_bkash():
+    modules = [{"name": "Payments", "description": "bKash card refunds"}]
+    assert best_module(RequirementInput("Customer should be able to pay by bKash.", modules=modules))[0] == "Payments"
 
 
 def test_two_description_words_are_a_match():
