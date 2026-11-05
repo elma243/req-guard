@@ -24,6 +24,7 @@ import {
   listRequirements,
   rejectRequirement,
   restoreRequirement,
+  undoRequirement,
   type Requirement,
   type RequirementDetail,
   type RequirementStatus,
@@ -203,7 +204,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
           ? await acceptRequirement(projectId, r.id)
           : await rejectRequirement(projectId, r.id, reason),
       );
-      show("info", `${r.code} ${PAST_TENSE[action]}`);
+      show("undo", `${r.code} ${PAST_TENSE[action]}`, () => void undo([r.id], r.id));
     } catch (err) {
       show("error", `${r.code}: ${errorText(err)}`);
     } finally {
@@ -218,12 +219,34 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
       const { updated, skipped } = await bulkRequirements(projectId, ids, action, reason);
       setRows(updated);
       setSelected(new Set());
-      if (panelId !== null && updated.some((r) => r.id === panelId)) setDetailReload((n) => n + 1);
+      setDetailReload((n) => n + 1);
       const done = `${PAST_TENSE[action].replace(/^./, (c) => c.toUpperCase())} ${updated.length}`;
       const codes = skipped.slice(0, 3).map((s) => s.code).join(", ");
-      show("info", skipped.length ? `${done}, skipped ${skipped.length}: ${codes}${skipped.length > 3 ? "..." : ""}` : done);
+      const text = skipped.length ? `${done}, skipped ${skipped.length}: ${codes}${skipped.length > 3 ? "..." : ""}` : done;
+      if (updated.length > 0) show("undo", text, () => void undo(updated.map((r) => r.id)));
+      else show("info", text);
     } catch (err) {
       show("error", errorText(err));
+    } finally {
+      markBusy(ids, false);
+    }
+  }
+
+  // Called from a toast, possibly after other actions: only uses functional state updates
+  async function undo(ids: number[], returnTo?: number) {
+    markBusy(ids, true);
+    try {
+      if (ids.length === 1) {
+        applyDetail(await undoRequirement(projectId, ids[0]));
+      } else {
+        const { updated, skipped } = await bulkRequirements(projectId, ids, "undo");
+        setRows(updated);
+        setDetailReload((n) => n + 1);
+        if (skipped.length) show("error", `Could not undo ${skipped.map((s) => s.code).join(", ")}`);
+      }
+      if (returnTo !== undefined) setActiveId(returnTo);
+    } catch (err) {
+      show("error", `Could not undo: ${errorText(err)}`);
     } finally {
       markBusy(ids, false);
     }
