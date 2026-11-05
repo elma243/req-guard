@@ -61,6 +61,14 @@ export function Confidence({ value }: { value: number | null }) {
   return value === null ? <span className="text-zinc-600">—</span> : <>{Math.round(value * 100)}%</>;
 }
 
+export function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">
+      {children}
+    </kbd>
+  );
+}
+
 export function SourceLine({ source: s }: { source: RequirementSource }) {
   return (
     <p className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">

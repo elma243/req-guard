@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useState } from "react";
 import { sourceLabel } from "@/components/SourceBadge";
 import { ToastStack, useToasts } from "@/components/Toast";
 import {
@@ -35,6 +35,7 @@ import MergeDialog from "./MergeDialog";
 import RejectDialog from "./RejectDialog";
 import RequirementPanel, { type DetailState } from "./RequirementPanel";
 import RequirementTable, { TableSkeleton } from "./RequirementTable";
+import { Kbd } from "./labels";
 
 type StatusFilter = RequirementStatus | "all";
 
@@ -293,6 +294,63 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     });
   }
 
+  function moveBy(step: number) {
+    if (visible.length === 0) return;
+    const index = visible.findIndex((r) => r.id === active?.id);
+    const next = index < 0 ? 0 : Math.min(Math.max(index + step, 0), visible.length - 1);
+    setActiveId(visible[next].id);
+  }
+
+  const onShortcut = useEffectEvent((e: KeyboardEvent) => {
+    if (dialog || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    const typing =
+      target?.closest("textarea, select, [contenteditable='true']") || target?.matches("input:not([type='checkbox'])");
+    if (typing) return;
+
+    // e.code is the physical key, so these still work with a Bangla keyboard layout active
+    const needsRow = () => {
+      if (!active && visible.length > 0) show("info", "Press J to choose a requirement first.");
+      return active && !busy.has(active.id) ? active : null;
+    };
+    let row: Requirement | null;
+    switch (e.code) {
+      case "KeyJ":
+        moveBy(1);
+        break;
+      case "KeyK":
+        moveBy(-1);
+        break;
+      case "KeyA":
+        if ((row = needsRow())) void review(row, "accept");
+        break;
+      case "KeyR":
+        if ((row = needsRow())) requestReject(row);
+        break;
+      case "KeyE":
+        if ((row = needsRow())) requestEdit(row);
+        break;
+      case "Enter":
+      case "NumpadEnter":
+        if (!active || target?.closest("button, a, input")) return; // their own Enter does the job
+        setPanelOpen(true);
+        break;
+      case "Escape":
+        if (!panelOpen) return;
+        setPanelOpen(false);
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  });
+
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => onShortcut(e);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
   const dialogRequirement = dialog && dialog.kind !== "reject" ? data?.find((r) => r.id === dialog.id) : undefined;
   const rejectTitle =
     dialog?.kind === "reject"
@@ -348,6 +406,9 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
               placeholder="Search text, code, sentence or author"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") e.currentTarget.blur(); // back to the keyboard shortcuts
+              }}
               className={`${inputClass} min-w-56 flex-1`}
             />
             <select
@@ -438,6 +499,28 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
         <p className="mt-4 text-sm text-zinc-500 tabular-nums">
           Showing {visible.length} of {data.length} · {data.filter((r) => r.status === "suggested").length} waiting for
           review
+        </p>
+      )}
+      {visible.length > 0 && (
+        <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+          <span>
+            <Kbd>J</Kbd> <Kbd>K</Kbd> next / previous
+          </span>
+          <span>
+            <Kbd>A</Kbd> accept
+          </span>
+          <span>
+            <Kbd>R</Kbd> reject
+          </span>
+          <span>
+            <Kbd>E</Kbd> edit
+          </span>
+          <span>
+            <Kbd>Enter</Kbd> open
+          </span>
+          <span>
+            <Kbd>Esc</Kbd> close
+          </span>
         </p>
       )}
 
