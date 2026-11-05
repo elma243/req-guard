@@ -25,6 +25,7 @@ import {
   rejectRequirement,
   restoreRequirement,
   undoRequirement,
+  validateRequirements,
   type Requirement,
   type RequirementDetail,
   type RequirementStatus,
@@ -49,7 +50,8 @@ const DETAIL_DELAY_MS = 120;
 const PAST_TENSE: Record<ReviewAction, string> = { accept: "accepted", reject: "rejected" };
 
 // The whole project is loaded once, so filters answer instantly and each status can show its count
-function matches(r: Requirement, type: RequirementType | "", source: string, query: string) {
+function matches(r: Requirement, type: RequirementType | "", source: string, issuesOnly: boolean, query: string) {
+  if (issuesOnly && !r.has_issues) return false;
   if (type && r.current.type !== type) return false;
   if (source && !r.sources.some((s) => s.source === source)) return false;
   if (!query) return true;
@@ -69,7 +71,9 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [typeFilter, setTypeFilter] = useState<RequirementType | "">("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [issuesOnly, setIssuesOnly] = useState(false);
   const [search, setSearch] = useState("");
+  const [validating, setValidating] = useState(false);
 
   // The row the keyboard and the panel work on
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -97,8 +101,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
 
   // Rows that pass every filter but status: the status chips count these
   const unfiltered = useMemo(
-    () => (data ?? []).filter((r) => matches(r, typeFilter, sourceFilter, query)),
-    [data, typeFilter, sourceFilter, query],
+    () => (data ?? []).filter((r) => matches(r, typeFilter, sourceFilter, issuesOnly, query)),
+    [data, typeFilter, sourceFilter, issuesOnly, query],
   );
   const counts = useMemo(() => {
     const byStatus: Partial<Record<RequirementStatus, number>> = {};
@@ -113,7 +117,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   const sources = useMemo(() => [...new Set((data ?? []).flatMap((r) => r.sources.map((s) => s.source)))].sort(), [data]);
   const codes = useMemo(() => new Map((data ?? []).map((r) => [r.id, r.code])), [data]);
 
-  const otherFilters = Boolean(typeFilter || sourceFilter || query);
+  const otherFilters = Boolean(typeFilter || sourceFilter || issuesOnly || query);
+  const issueCount = useMemo(() => (data ?? []).filter((r) => r.has_issues).length, [data]);
 
   // Filtered out = no active row, so nothing can act on a requirement you cannot see
   const active = visible.find((r) => r.id === activeId) ?? null;
@@ -163,6 +168,21 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     listRequirements(projectId)
       .then((data) => setResult({ data }))
       .catch((err) => show("error", `Could not refresh the list: ${errorText(err)}`));
+  }
+
+  async function validate() {
+    if (validating) return;
+    setValidating(true);
+    try {
+      const { validated, with_issues } = await validateRequirements(projectId);
+      refreshList();
+      setDetailReload((n) => n + 1);
+      show("info", `Validated ${validated}. ${with_issues} may have issues.`);
+    } catch (err) {
+      show("error", `Could not validate: ${errorText(err)}`);
+    } finally {
+      setValidating(false);
+    }
   }
 
   function markBusy(ids: number[], on: boolean) {
@@ -363,6 +383,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     setStatusFilter("all");
     setTypeFilter("");
     setSourceFilter("");
+    setIssuesOnly(false);
     setSearch("");
   }
 
@@ -398,6 +419,17 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
             {REQUIREMENT_STATUSES.map((s) => (
               <StatusChip key={s} label={s} count={counts[s] ?? 0} on={statusFilter === s} onClick={() => setStatusFilter(s)} />
             ))}
+            <span className="ml-auto flex items-center gap-2">
+              <StatusChip
+                label="Has issues"
+                count={issueCount}
+                on={issuesOnly}
+                onClick={() => setIssuesOnly(!issuesOnly)}
+              />
+              <button type="button" onClick={() => void validate()} disabled={validating} className={primaryButton}>
+                {validating ? "Validating..." : "Validate"}
+              </button>
+            </span>
           </div>
           <div className="flex flex-wrap gap-3">
             <input
