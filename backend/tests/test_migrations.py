@@ -25,7 +25,7 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert {"credentials_encrypted", "sync_status", "sync_error"} <= source_columns
     assert {"requirements", "requirement_versions", "requirement_sources"} <= set(inspect(engine).get_table_names())
     assert "requirements_extracted_at" in {c["name"] for c in inspect(engine).get_columns("messages")}
-    assert "requirement_counter" in {c["name"] for c in inspect(engine).get_columns("projects")}
+    assert {"requirement_counter", "modules"} <= {c["name"] for c in inspect(engine).get_columns("projects")}
     requirement_checks = {c["name"] for c in inspect(engine).get_check_constraints("requirements")}
     assert {"ck_requirements_origin", "ck_requirements_status"} <= requirement_checks
     assert {"reject_reason", "previous_status"} <= {c["name"] for c in inspect(engine).get_columns("requirements")}
