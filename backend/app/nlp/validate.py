@@ -6,6 +6,8 @@ rule 7). The word lists are in app/nlp/lexicon.py.
 Text is NFC-normalised before matching, because ড় ঢ় য় can be typed in two Unicode forms. Requirement statements
 are usually English, but the rule-based extraction fallback stores the client's own Bangla or Banglish sentence
 as the statement, so every rule handles all three languages.
+
+validate_requirement stores the result; the rules themselves need no database.
 """
 
 import re
@@ -13,6 +15,10 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.models import Project, Requirement, ValidationFinding
 from app.nlp.extraction import count_requirement_cues, has_requirement_cue
 from app.nlp.lexicon import (
     ACTION_VERBS,
@@ -27,6 +33,7 @@ from app.nlp.lexicon import (
     UNITS_BANGLA,
     VAGUE_WORDS,
 )
+from app.schemas.requirement import ValidateResult
 
 # Word characters. \w alone misses Bengali vowel signs, which is also why \b is unreliable in Bangla text.
 _WORD_CHARS = r"\wঀ-৿"
@@ -293,3 +300,81 @@ def score_quality(item: RequirementInput, findings: Iterable[Draft]) -> tuple[in
         {"criterion": name, "points": points, "reason": reason} for name, points, ok, reason in applicable if not ok
     ]
     return round(100 * passed / total), failed
+
+
+# ---------- storing ----------
+
+
+def validate_requirement(requirement: Requirement, project: Project) -> None:
+    """Check the current version and store the findings, score and module. The caller commits.
+
+    Rule 2: only findings that are still origin "ai" and status "suggested" are updated or removed. A finding a
+    person decided on stays as it is and is not added again, and a rejected one no longer fails its criterion.
+    """
+    current = requirement.current
+    item = RequirementInput(
+        statement=current.statement,
+        type=current.type,
+        actor=current.actor,
+        version_origin=current.origin,
+        sources=[s.source_sentence for s in requirement.sources],
+        modules=project.modules,
+        scope_text=project.scope_text,
+    )
+    drafts, module = run_rules(item)
+    wanted = {d.key: d for d in drafts}
+
+    for finding in list(requirement.findings):
+        if finding.origin != "ai" or finding.status != "suggested":
+            continue
+        draft = wanted.get((finding.rule, finding.evidence))
+        if draft is None:
+            requirement.findings.remove(finding)
+        else:
+            finding.version = current.version
+            finding.category, finding.severity, finding.reason = draft.category, draft.severity, draft.reason
+
+    stored = {(f.rule, f.evidence) for f in requirement.findings}
+    for draft in drafts:
+        if draft.key not in stored:
+            requirement.findings.append(
+                ValidationFinding(
+                    version=current.version,
+                    category=draft.category,
+                    rule=draft.rule,
+                    severity=draft.severity,
+                    reason=draft.reason,
+                    evidence=draft.evidence,
+                    origin="ai",
+                    status="suggested",
+                )
+            )
+
+    rejected = {(f.rule, f.evidence) for f in requirement.findings if f.status == "rejected"}
+    requirement.quality_score, requirement.quality_failed = score_quality(
+        item, [d for d in drafts if d.key not in rejected]
+    )
+    requirement.module_name, requirement.module_score = module or (None, None)
+
+
+def validate_project(db: Session, project: Project, *, only_new: bool = False) -> ValidateResult:
+    """Validate every requirement of the project, or with `only_new` those never validated. The caller commits."""
+    query = (
+        select(Requirement)
+        .where(Requirement.project_id == project.id)
+        .options(
+            selectinload(Requirement.versions),
+            selectinload(Requirement.sources),
+            selectinload(Requirement.findings),
+        )
+    )
+    if only_new:
+        query = query.where(Requirement.quality_score.is_(None))
+    requirements = db.scalars(query).all()
+    for requirement in requirements:
+        validate_requirement(requirement, project)
+    return ValidateResult(
+        validated=len(requirements),
+        with_issues=sum(1 for r in requirements if r.has_issues),
+        findings=sum(r.open_findings for r in requirements),
+    )

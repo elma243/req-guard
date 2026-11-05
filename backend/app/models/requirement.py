@@ -90,6 +90,16 @@ class Requirement(Base):
     def current(self) -> "RequirementVersion":
         return self.versions[-1]
 
+    @property
+    def open_findings(self) -> int:
+        """Findings no person has rejected."""
+        return sum(1 for f in self.findings if f.status != "rejected")
+
+    @property
+    def has_issues(self) -> bool:
+        """A closed requirement (rejected, merged) needs no more work, whatever the rules found."""
+        return self.status not in ("rejected", "merged") and bool(self.open_findings or self.quality_failed)
+
 
 class RequirementVersion(Base):
     """One version of a requirement's content. Rows are only ever added."""

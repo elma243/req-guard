@@ -111,3 +111,11 @@ class BulkSkipped(BaseModel):
 class BulkResult(BaseModel):
     updated: list[RequirementOut]
     skipped: list[BulkSkipped]
+
+
+class ValidateResult(BaseModel):
+    validated: int
+    # Open requirements with findings or failed criteria
+    with_issues: int
+    # Findings not rejected by a person
+    findings: int
