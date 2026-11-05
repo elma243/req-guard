@@ -13,7 +13,17 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from app.nlp.lexicon import VAGUE_WORDS
+from app.nlp.lexicon import (
+    ACTOR_WORDS,
+    ACTOR_WORDS_BANGLA,
+    COMPARATORS,
+    LIMIT_WORDS,
+    LIMIT_WORDS_BANGLA,
+    NUMBER_WORDS,
+    UNITS,
+    UNITS_BANGLA,
+    VAGUE_WORDS,
+)
 
 # Word characters. \w alone misses Bengali vowel signs, which is also why \b is unreliable in Bangla text.
 _WORD_CHARS = r"\wঀ-৿"
@@ -29,8 +39,12 @@ def _alternatives(terms: Iterable[str]) -> str:
     return "|".join(r"[\s-]+".join(re.escape(part) for part in term.split(" ")) for term in ordered)
 
 
-def _whole_words(terms: Iterable[str]) -> re.Pattern:
-    return re.compile(rf"(?<![{_WORD_CHARS}])(?:{_alternatives(terms)})(?![{_WORD_CHARS}])", re.IGNORECASE)
+def _whole_words(terms: Iterable[str], word_starts: Iterable[str] = ()) -> re.Pattern:
+    """`terms` as whole words; `word_starts` may also have an ending (Bangla case endings)."""
+    pattern = rf"(?:{_alternatives(terms)})(?![{_WORD_CHARS}])"
+    if word_starts:
+        pattern = rf"(?:{pattern}|{_alternatives(word_starts)})"
+    return re.compile(rf"(?<![{_WORD_CHARS}]){pattern}", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -96,4 +110,44 @@ def check_vague(item: RequirementInput) -> list[Draft]:
                 "low",
                 'The client\'s sentence says "{word}", which may be vague. It may need a clarifying question.',
             )
+    return drafts
+
+
+# ---------- missing information ----------
+
+_ACTOR = _whole_words(ACTOR_WORDS, ACTOR_WORDS_BANGLA)
+_LIMIT = _whole_words(LIMIT_WORDS, LIMIT_WORDS_BANGLA)
+
+_NUMBER = rf"(?:\d+(?:[.,]\d+)*|{_alternatives(NUMBER_WORDS)})"  # \d also matches Bengali digits
+_MEASURABLE = re.compile(
+    # A number with a unit: "2 seconds", "200ms", "99.9%", "৩ দিনে"
+    rf"(?<![{_WORD_CHARS}.]){_NUMBER}\s*-?\s*"
+    rf"(?:%|(?:{_alternatives(UNITS)})(?![{_WORD_CHARS}])|{_alternatives(UNITS_BANGLA)})"
+    # A comparator with a number: "at most 5", "সর্বোচ্চ ৫"
+    rf"|(?<![{_WORD_CHARS}])(?:{_alternatives(COMPARATORS)})\s+(?:of\s+)?{_NUMBER}(?![{_WORD_CHARS}])",
+    re.IGNORECASE,
+)
+
+
+def has_measurable_value(text: str) -> bool:
+    return _MEASURABLE.search(_normal(text)) is not None
+
+
+def check_missing_info(item: RequirementInput) -> list[Draft]:
+    """No actor (functional), no measurable value (non-functional), or no value where a limit is expected."""
+    statement = _normal(item.statement)
+    if item.type == "non_functional":
+        if has_measurable_value(statement):
+            return []
+        reason = "No measurable value was found, so this may be hard to test."
+        return [Draft("missing_info", "no_measurable_value", "high", reason, item.evidence)]
+
+    drafts: list[Draft] = []
+    if not item.actor.strip() and _ACTOR.search(statement) is None:
+        reason = "No actor was found, so it may be unclear who needs this."
+        drafts.append(Draft("missing_info", "no_actor", "medium", reason, item.evidence))
+    limit = _LIMIT.search(statement)
+    if limit and not has_measurable_value(statement):
+        reason = f'"{limit.group()}" may need a time or a limit, but no value was found.'
+        drafts.append(Draft("missing_info", "missing_limit", "medium", reason, limit.group()))
     return drafts
