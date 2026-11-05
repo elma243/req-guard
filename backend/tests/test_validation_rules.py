@@ -170,6 +170,7 @@ def nfr(statement: str) -> RequirementInput:
     [
         "The system shall respond quickly.",
         "The system shall use OAuth 2.",  # a version, not a value
+        "The system shall require a one-time password.",
         "site ta nirapod hote hobe",
         "সাইট নিরাপদ হতে হবে।",
     ],
@@ -187,6 +188,7 @@ def test_no_measurable_value(statement):
     [
         "The page shall load in 2 seconds.",
         "The page shall load in 200ms.",
+        "The system shall give a 30-minute session.",
         "Uptime shall be 99.9%.",
         "The system shall support 1,000 concurrent users.",
         "The system shall allow at most 5 logins.",

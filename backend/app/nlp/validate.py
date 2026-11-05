@@ -128,10 +128,12 @@ def check_vague(item: RequirementInput) -> list[Draft]:
 _ACTOR = _whole_words(ACTOR_WORDS, ACTOR_WORDS_BANGLA)
 _LIMIT = _whole_words(LIMIT_WORDS, LIMIT_WORDS_BANGLA)
 
-_NUMBER = rf"(?:\d+(?:[.,]\d+)*|{_alternatives(NUMBER_WORDS)})"  # \d also matches Bengali digits
+_DIGITS = r"\d+(?:[.,]\d+)*"  # \d also matches Bengali digits
+_NUMBER = rf"(?:{_DIGITS}|{_alternatives(NUMBER_WORDS)})"
 _MEASURABLE = re.compile(
-    # A number with a unit: "2 seconds", "200ms", "99.9%", "৩ দিনে"
-    rf"(?<![{_WORD_CHARS}.]){_NUMBER}\s*-?\s*"
+    # A number with a unit: "2 seconds", "2-second", "200ms", "99.9%", "৩ দিনে". Only digits take a hyphen:
+    # "one-time password" is no value.
+    rf"(?<![{_WORD_CHARS}.])(?:{_DIGITS}\s*-?\s*|(?:{_alternatives(NUMBER_WORDS)})\s*)"
     rf"(?:%|(?:{_alternatives(UNITS)})(?![{_WORD_CHARS}])|{_alternatives(UNITS_BANGLA)})"
     # A comparator with a number: "at most 5", "সর্বোচ্চ ৫"
     rf"|(?<![{_WORD_CHARS}])(?:{_alternatives(COMPARATORS)})\s+(?:of\s+)?{_NUMBER}(?![{_WORD_CHARS}])",
