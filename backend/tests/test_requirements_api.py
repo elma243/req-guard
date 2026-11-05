@@ -423,6 +423,55 @@ def test_version_of_a_deleted_user_has_no_name(client, extracted, make_user, db_
     assert (version["created_by_id"], version["created_by_name"], version["statement"]) == (None, None, "Second text.")
 
 
+def test_review_actions_add_no_version(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    rid, other = reqs["REQ-001"]["id"], reqs["REQ-002"]["id"]
+    url = f"{base}/requirements/{rid}"
+    versions = client.patch(url, json={"statement": "Second text."}, headers=headers).json()["versions"]
+
+    for action in ("accept", "undo", "reject", "restore"):
+        assert client.post(f"{url}/{action}", headers=headers).status_code == 200
+    for action in ("accept", "undo"):
+        assert client.post(f"{base}/requirements/bulk", json={"ids": [rid], "action": action}, headers=headers).status_code == 200
+    assert client.post(f"{url}/merge", json={"other_ids": [other]}, headers=headers).status_code == 200
+
+    detail = client.get(url, headers=headers).json()
+    assert (detail["versions"], detail["version_count"]) == (versions, 2)
+    assert detail["current"]["statement"] == "Second text."
+
+
+def test_merged_requirement_keeps_its_version_history(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-001"]["id"]
+    url = f"{base}/requirements/{other}"
+    versions = client.patch(url, json={"statement": "Second text."}, headers=headers).json()["versions"]
+
+    client.post(f"{base}/requirements/{target}/merge", json={"other_ids": [other]}, headers=headers)
+
+    detail = client.get(url, headers=headers).json()
+    assert (detail["status"], detail["versions"]) == ("merged", versions)
+
+
+def test_version_history_stays_after_the_source_message_is_deleted(client, extracted):
+    headers, base, _ = extracted
+    req = by_code(client, headers, base)["REQ-004"]
+    url = f"{base}/requirements/{req['id']}"
+    client.patch(url, json={"statement": "Second text."}, headers=headers)
+    client.delete(f"{base}/messages/{req['sources'][0]['message_id']}", headers=headers)
+
+    detail = client.get(url, headers=headers).json()
+
+    assert detail["sources"] == []
+    assert [v["statement"] for v in detail["versions"]] == [req["current"]["statement"], "Second text."]
+
+
+def test_detail_of_an_unknown_requirement(client, extracted):
+    headers, base, _ = extracted
+    assert client.get(f"{base}/requirements/999999", headers=headers).status_code == 404
+
+
 def test_detail_has_the_full_message_and_the_list_does_not(client, extracted):
     headers, base, _ = extracted
     req = by_code(client, headers, base)["REQ-001"]
@@ -483,6 +532,24 @@ def test_reject_reason_is_shown_only_while_rejected(client, extracted):
     assert act(client, headers, base, rid, "accept").json()["reject_reason"] is None
     assert act(client, headers, base, rid, "undo").json()["reject_reason"] == "Not needed"
     assert act(client, headers, base, rid, "restore").json()["reject_reason"] is None
+
+
+def test_rejecting_again_replaces_the_reason_and_keeps_the_undo(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    act(client, headers, base, rid, "accept")
+    act(client, headers, base, rid, "reject", reason="First reason")
+
+    again = act(client, headers, base, rid, "reject", reason="Second reason")
+
+    assert again.json()["reject_reason"] == "Second reason"
+    assert act(client, headers, base, rid, "undo").json()["status"] == "accepted"
+
+
+@pytest.mark.parametrize("action", ["accept", "reject", "undo", "restore"])
+def test_review_action_on_an_unknown_requirement(client, extracted, action):
+    headers, base, _ = extracted
+    assert act(client, headers, base, 999999, action).status_code == 404
 
 
 # ---------- undo ----------
@@ -623,6 +690,22 @@ def test_restore_keeps_a_sentence_another_merged_item_still_needs(client, extrac
     assert sentences() == [BANGLISH_PDF]
 
 
+def test_restore_merged_after_its_target_is_gone(client, extracted, db_session_factory):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    target, other = reqs["REQ-004"]["id"], reqs["REQ-001"]["id"]
+    act(client, headers, base, target, "merge", other_ids=[other])
+    db = db_session_factory()
+    db.get(Requirement, other).merged_into_id = None  # what deleting the target leaves behind
+    db.commit()
+    db.close()
+
+    res = act(client, headers, base, other, "restore")
+
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "suggested"
+
+
 def test_restored_edit_survives_force_extract(client, extracted, llm):
     headers, base, _ = extracted
     rid = by_code(client, headers, base)["REQ-001"]["id"]
@@ -667,6 +750,53 @@ def test_bulk_reject_uses_one_reason(client, extracted):
     assert [(r["status"], r["reject_reason"]) for r in body["updated"]] == [("rejected", "Phase 2")] * 2
 
 
+def test_bulk_reject_reason_is_optional(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+
+    without = bulk(client, headers, base, [reqs["REQ-001"]["id"]], "reject").json()
+    blank = bulk(client, headers, base, [reqs["REQ-002"]["id"]], "reject", reason="   ").json()
+
+    assert without["updated"][0]["reject_reason"] is None
+    assert blank["updated"][0]["reject_reason"] is None
+
+
+def test_bulk_reject_keeps_the_reason_of_an_already_rejected_one(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    earlier, fresh = reqs["REQ-001"]["id"], reqs["REQ-002"]["id"]
+    act(client, headers, base, earlier, "reject", reason="Original reason")
+
+    body = bulk(client, headers, base, [earlier, fresh], "reject", reason="New reason").json()
+
+    assert [r["code"] for r in body["updated"]] == ["REQ-002"]
+    assert [(s["code"], s["reason"]) for s in body["skipped"]] == [("REQ-001", "Already rejected")]
+    assert by_code(client, headers, base)["REQ-001"]["reject_reason"] == "Original reason"
+
+
+def test_bulk_undo_of_a_reject(client, extracted):
+    headers, base, _ = extracted
+    reqs = by_code(client, headers, base)
+    ids = [reqs["REQ-001"]["id"], reqs["REQ-002"]["id"]]
+    act(client, headers, base, ids[0], "accept")
+    bulk(client, headers, base, ids, "reject", reason="Phase 2")
+
+    body = bulk(client, headers, base, ids, "undo").json()
+
+    assert [(r["status"], r["reject_reason"]) for r in body["updated"]] == [("accepted", None), ("suggested", None)]
+    second = bulk(client, headers, base, ids, "undo").json()
+    assert second["updated"] == [] and len(second["skipped"]) == 2
+
+
+def test_single_undo_after_a_repeated_bulk_accept(client, extracted):
+    headers, base, _ = extracted
+    rid = by_code(client, headers, base)["REQ-001"]["id"]
+    bulk(client, headers, base, [rid], "accept")
+    assert bulk(client, headers, base, [rid], "accept").json()["updated"] == []
+
+    assert act(client, headers, base, rid, "undo").json()["status"] == "suggested"
+
+
 def test_bulk_undo_returns_each_to_its_own_status(client, extracted):
     headers, base, _ = extracted
     reqs = by_code(client, headers, base)
@@ -694,8 +824,20 @@ def test_bulk_skips_and_reports_what_it_cannot_change(client, extracted):
         ("REQ-005", "REQ-005 was merged into another requirement"),
     ]
 
-    undone = bulk(client, headers, base, [reqs["REQ-003"]["id"]], "undo").json()
-    assert undone["updated"] == [] and undone["skipped"][0]["reason"] == "REQ-003 has nothing to undo"
+    # What could change is saved; what was skipped stays as it was
+    after = by_code(client, headers, base)
+    assert (after["REQ-001"]["status"], after["REQ-002"]["status"], after["REQ-005"]["status"]) == (
+        "accepted",
+        "accepted",
+        "merged",
+    )
+
+    undone = bulk(client, headers, base, [reqs["REQ-003"]["id"], merged], "undo").json()
+    assert undone["updated"] == []
+    assert [s["reason"] for s in undone["skipped"]] == [
+        "REQ-003 has nothing to undo",
+        "REQ-005 was merged into another requirement",
+    ]
 
 
 def test_bulk_with_an_unknown_id_changes_nothing(client, extracted):
@@ -714,6 +856,7 @@ def test_bulk_validation(client, extracted):
 
     assert bulk(client, headers, base, [], "accept").status_code == 422
     assert bulk(client, headers, base, list(range(1, 202)), "accept").status_code == 422
+    assert bulk(client, headers, base, list(range(1, 201)), "accept").status_code == 404  # 200 passes validation
     assert bulk(client, headers, base, [rid], "merge").status_code == 422
     assert bulk(client, headers, base, [rid], "reject", reason="x" * 1001).status_code == 422
 
@@ -756,7 +899,8 @@ def test_requirements_are_per_project_and_owner_only(client, extracted, make_use
     for action in ("reject", "undo", "restore"):
         assert client.post(f"{base}/requirements/{rid}/{action}", headers=stranger).status_code == 404
     # The owner cannot reach it through another of their projects either
-    assert client.post(f"/projects/{other['id']}/requirements/{rid}/restore", headers=headers).status_code == 404
+    for action in ("accept", "reject", "undo", "restore"):
+        assert client.post(f"/projects/{other['id']}/requirements/{rid}/{action}", headers=headers).status_code == 404
     assert bulk(client, stranger, base, [rid], "accept").status_code == 404
     assert listed(client, headers, base)[0]["status"] == "suggested"
 
@@ -765,6 +909,7 @@ def test_login_required(client, extracted):
     _, base, _ = extracted
     assert client.get(f"{base}/requirements").status_code == 401
     assert client.post(f"{base}/requirements/extract").status_code == 401
-    assert client.post(f"{base}/requirements/1/undo").status_code == 401
-    assert client.post(f"{base}/requirements/1/restore").status_code == 401
+    assert client.get(f"{base}/requirements/1").status_code == 401
+    for action in ("accept", "reject", "undo", "restore"):
+        assert client.post(f"{base}/requirements/1/{action}").status_code == 401
     assert client.post(f"{base}/requirements/bulk", json={"ids": [1], "action": "accept"}).status_code == 401
