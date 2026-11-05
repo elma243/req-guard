@@ -4,7 +4,15 @@ import unicodedata
 
 import pytest
 
-from app.nlp.validate import Draft, RequirementInput, check_missing_info, check_vague, has_measurable_value
+from app.nlp.validate import (
+    Draft,
+    RequirementInput,
+    best_module,
+    check_alignment,
+    check_missing_info,
+    check_vague,
+    has_measurable_value,
+)
 
 
 def words(drafts: list[Draft]) -> list[str]:
@@ -235,3 +243,114 @@ def test_limit_with_a_value_is_fine(statement):
 def test_missing_limit_is_only_for_functional():
     # A non-functional requirement already gets no_measurable_value; one finding is enough
     assert rules(check_missing_info(nfr("Backups shall be kept."))) == ["no_measurable_value"]
+
+
+# ---------- modules and scope ----------
+
+MODULES = [
+    {"name": "Payments", "description": "bKash, card checkout and refunds পেমেন্ট বিকাশ"},
+    {"name": "Order Tracking", "description": "delivery status and courier updates"},
+    {"name": "Reports", "description": ""},
+]
+SCOPE = "An online shop with payments, delivery tracking, customer accounts and sales reports."
+
+
+@pytest.mark.parametrize(
+    "statement, module",
+    [
+        ("The system shall accept payments by card.", "Payments"),
+        ("The system shall export reports.", "Reports"),
+        ("The system shall list every order.", "Order Tracking"),  # one word of a two-word name
+        ("bKash e payment korte parbe", "Payments"),
+        ("reporter PDF download lagbe", "Reports"),  # Banglish ending
+        ("বিকাশের পেমেন্টের রসিদ লাগবে।", "Payments"),  # Bangla endings, two words of the description
+        ("বিকাশ দিয়ে পেমেন্ট নেওয়া যাবে।", "Payments"),
+    ],
+)
+def test_module_match(statement, module):
+    assert best_module(RequirementInput(statement, modules=MODULES))[0] == module
+
+
+def test_module_name_in_bangla():
+    item = RequirementInput("পেমেন্টের রসিদ লাগবে।", modules=[{"name": "পেমেন্ট"}])
+    assert best_module(item) == ("পেমেন্ট", 0.6)
+
+
+def test_module_match_also_reads_the_source_sentence():
+    item = RequirementInput("The system shall send a receipt.", sources=["payment er por receipt chai"], modules=MODULES)
+    assert best_module(item)[0] == "Payments"
+
+
+def test_best_module_wins_and_has_a_score():
+    item = RequirementInput("The system shall handle refunds and payments by card.", modules=MODULES)
+    name, score = best_module(item)
+
+    assert name == "Payments"
+    assert 0.6 < score <= 1
+
+
+def test_one_description_word_is_not_a_match():
+    assert best_module(RequirementInput("The system shall list every courier.", modules=MODULES)) is None
+
+
+def test_two_description_words_are_a_match():
+    item = RequirementInput("The system shall show the courier for each delivery.", modules=MODULES)
+    assert best_module(item)[0] == "Order Tracking"
+
+
+def test_generic_words_do_not_match():
+    modules = [{"name": "User Management", "description": "system features for users"}]
+    assert best_module(RequirementInput("The system shall let users see a new page.", modules=modules)) is None
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["The system shall play music.", "gaan bajano hobe", "গান বাজানো হবে।"],
+)
+def test_no_matching_module(statement):
+    item = RequirementInput(statement, modules=MODULES, sources=["The sentence."])
+    drafts = check_alignment(item, best_module(item))
+
+    assert rules(drafts) == ["no_matching_module"]
+    assert drafts[0].category == "module_alignment"
+    assert drafts[0].evidence == "The sentence."
+
+
+def test_a_project_without_modules_or_scope_is_not_judged():
+    item = RequirementInput("The system shall play music.")
+    assert best_module(item) is None
+    assert check_alignment(item, None) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["The system shall play music.", "gaan bajano hobe", "গান বাজানো হবে।"],
+)
+def test_possible_out_of_scope(statement):
+    item = RequirementInput(statement, scope_text=SCOPE)
+    drafts = check_alignment(item, None)
+
+    assert rules(drafts) == ["possible_out_of_scope"]
+    assert drafts[0].category == "out_of_scope"
+
+
+def test_out_of_scope_comes_with_no_matching_module():
+    item = RequirementInput("The system shall play music.", modules=MODULES, scope_text=SCOPE)
+    assert rules(check_alignment(item, best_module(item))) == ["no_matching_module", "possible_out_of_scope"]
+
+
+@pytest.mark.parametrize(
+    "statement, scope",
+    [
+        ("The system shall keep delivery tracking accounts.", SCOPE),
+        ("delivery tracking lagbe", SCOPE),
+        ("ডেলিভারি ট্র্যাকিং লাগবে।", "ডেলিভারি ট্র্যাকিং ও পেমেন্ট সহ অনলাইন দোকান"),
+    ],
+)
+def test_covered_by_the_scope_text(statement, scope):
+    assert check_alignment(RequirementInput(statement, scope_text=scope), None) == []
+
+
+def test_a_module_match_means_no_scope_finding():
+    item = RequirementInput("The system shall accept payments.", modules=MODULES, scope_text="A blog.")
+    assert check_alignment(item, best_module(item)) == []

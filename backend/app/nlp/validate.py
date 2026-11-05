@@ -20,6 +20,7 @@ from app.nlp.lexicon import (
     LIMIT_WORDS,
     LIMIT_WORDS_BANGLA,
     NUMBER_WORDS,
+    STOP_WORDS,
     UNITS,
     UNITS_BANGLA,
     VAGUE_WORDS,
@@ -150,4 +151,67 @@ def check_missing_info(item: RequirementInput) -> list[Draft]:
     if limit and not has_measurable_value(statement):
         reason = f'"{limit.group()}" may need a time or a limit, but no value was found.'
         drafts.append(Draft("missing_info", "missing_limit", "medium", reason, limit.group()))
+    return drafts
+
+
+# ---------- modules and scope ----------
+
+# Weights of a module's name and description in its score, and how many description words give the full weight
+NAME_WEIGHT = 0.6
+DESCRIPTION_WEIGHT = 0.4
+DESCRIPTION_WORDS = 3
+# One word of a one- or two-word name is a match (0.6, 0.3); so are two description words (0.27), but not one (0.13)
+MODULE_MATCH = 0.25
+# Share of the statement's words the scope text must contain
+SCOPE_COVERAGE = 0.3
+
+_WORD = re.compile(rf"[{_WORD_CHARS}]+")
+
+
+def _content_words(text: str) -> set[str]:
+    words = {w.lower() for w in _WORD.findall(_normal(text))}
+    return {w for w in words if len(w) >= 3 and w not in STOP_WORDS and not w.isdigit()}
+
+
+def _same_word(a: str, b: str) -> bool:
+    """The same word, maybe with an ending: payment, payments, paymenter; পেমেন্ট, পেমেন্টের."""
+    short, long = sorted((a.removesuffix("s"), b.removesuffix("s")), key=len)
+    return short == long or (len(short) >= 4 and long.startswith(short) and len(long) - len(short) <= 3)
+
+
+def _hits(terms: set[str], words: set[str]) -> int:
+    return sum(1 for term in terms if any(_same_word(term, word) for word in words))
+
+
+def best_module(item: RequirementInput) -> tuple[str, float] | None:
+    """The best-matching module and its score (0-1), or None when no module reaches MODULE_MATCH."""
+    words = _content_words(" ".join([item.statement, *item.sources]))
+    best: tuple[str, float] | None = None
+    for module in item.modules:
+        name = _content_words(module["name"])
+        description = _content_words(module.get("description", "")) - name
+        score = DESCRIPTION_WEIGHT * min(_hits(description, words), DESCRIPTION_WORDS) / DESCRIPTION_WORDS
+        if name:
+            score += NAME_WEIGHT * _hits(name, words) / len(name)
+        if score >= MODULE_MATCH and (best is None or score > best[1]):
+            best = (module["name"], round(score, 2))
+    return best
+
+
+def _covered_by_scope(item: RequirementInput) -> bool:
+    words = _content_words(item.statement)
+    return not words or _hits(words, _content_words(item.scope_text)) / len(words) >= SCOPE_COVERAGE
+
+
+def check_alignment(item: RequirementInput, module: tuple[str, float] | None) -> list[Draft]:
+    """`module` is the answer of best_module. Nothing is judged for a project without modules and scope."""
+    if module is not None:
+        return []
+    drafts: list[Draft] = []
+    if item.modules:
+        reason = "No matching module: this may not belong to any module of the project."
+        drafts.append(Draft("module_alignment", "no_matching_module", "medium", reason, item.evidence))
+    if item.scope_text.strip() and not _covered_by_scope(item):
+        reason = "Possible extra work: this may be outside the agreed project scope."
+        drafts.append(Draft("out_of_scope", "possible_out_of_scope", "medium", reason, item.evidence))
     return drafts

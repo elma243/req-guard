@@ -105,3 +105,22 @@ LIMIT_WORDS = {
 LIMIT_WORDS_BANGLA = {
     "মেয়াদ", "সময়সীমা", "সীমা", "ডেডলাইন", "রিমাইন্ডার", "ব্যাকআপ", "টাইমআউট", "সর্বোচ্চ", "সর্বনিম্ন", "কোটা", "আপলোড", "সংযুক্তি",
 }  # fmt: skip
+
+# ---------- modules and scope ----------
+
+# Words that say nothing about which part of a product a requirement belongs to
+STOP_WORDS = {
+    # English
+    "the", "and", "for", "with", "from", "that", "this", "these", "those", "have", "has", "are", "was", "were", "been",
+    "all", "any", "each", "every", "when", "where", "while", "not", "only", "their", "there", "they", "into", "per",
+    "via", "after", "before", "can", "could", "may", "might", "will", "would", "shall", "must", "should", "need",
+    "needs", "want", "wants", "able", "allow", "allows", "let", "lets", "use", "uses", "using", "get", "gets", "see",
+    "system", "systems", "user", "users", "app", "application", "applications", "software", "platform", "module",
+    "modules", "feature", "features", "management", "service", "services", "page", "pages", "data", "new",
+    # Banglish
+    "hobe", "lagbe", "korte", "parbe", "chai", "ami", "amra", "amader", "apnar", "jabe", "thakbe", "kore", "kora",
+    "jonno", "theke", "diye", "ebong", "tar", "sob", "dite", "hok", "hote",
+    # Bangla
+    "হবে", "লাগবে", "করতে", "পারবে", "চাই", "আমি", "আমরা", "আমাদের", "আপনার", "থাকবে", "যাবে", "করে", "করা", "জন্য", "থেকে",
+    "দিয়ে", "এবং", "সব", "দিতে", "হতে",
+}  # fmt: skip
