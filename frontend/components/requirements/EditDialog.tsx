@@ -27,6 +27,7 @@ export default function EditDialog({
 }) {
   const v = r.current;
   const [statement, setStatement] = useState(v.statement);
+  const [actor, setActor] = useState(v.actor);
   const [type, setType] = useState<RequirementType>(v.type);
   const [category, setCategory] = useState<NfrCategory>(v.nfr_category ?? "other");
   const [saving, setSaving] = useState(false);
@@ -35,6 +36,7 @@ export default function EditDialog({
   const text = statement.trim();
   const changes: RequirementUpdate = {};
   if (text !== v.statement) changes.statement = text;
+  if (actor.trim() !== v.actor) changes.actor = actor.trim();
   if (type !== v.type) changes.type = type;
   if (type === "non_functional" && category !== v.nfr_category) changes.nfr_category = category;
   const dirty = Object.keys(changes).length > 0;
@@ -87,6 +89,17 @@ export default function EditDialog({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.currentTarget.form?.requestSubmit();
             }}
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <Label htmlFor="edit-actor">Actor</Label>
+          <input
+            id="edit-actor"
+            maxLength={200}
+            placeholder="Who needs this, e.g. customer"
+            value={actor}
+            onChange={(e) => setActor(e.target.value)}
             className={inputClass}
           />
         </div>
