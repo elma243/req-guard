@@ -152,7 +152,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
 
   function applyDetail(updated: RequirementDetail) {
     setRows([updated]);
-    setDetail({ id: updated.id, data: updated });
+    // The panel may be on the next row by now: its detail must not be replaced by this slower answer
+    setDetail((current) => (current?.id === updated.id ? { id: updated.id, data: updated } : current));
   }
 
   // After a merge or restore other rows changed too (their sources)
