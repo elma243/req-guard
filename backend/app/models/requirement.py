@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -41,6 +52,15 @@ class Requirement(Base):
     reject_reason: Mapped[str | None] = mapped_column(Text)
     # The status before the last accept / reject, which undo returns to. None when there is nothing to undo
     previous_status: Mapped[str | None] = mapped_column(String(20))
+    # Latest validation (app/nlp/validate.py). Here and not on the version, because version rows are only ever
+    # added and a re-run can change the result for the same text (for example when the modules change).
+    # 0-100; None = not validated yet
+    quality_score: Mapped[int | None] = mapped_column(Integer)
+    # The criteria that failed: [{"criterion", "points", "reason"}]
+    quality_failed: Mapped[list[dict]] = mapped_column(JSON, default=list, server_default="[]")
+    # Best-matching module of the project and how well it matched (0-1); None when none matches
+    module_name: Mapped[str | None] = mapped_column(String(100))
+    module_score: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -59,10 +79,26 @@ class Requirement(Base):
         order_by="RequirementSource.id",
         foreign_keys="RequirementSource.requirement_id",
     )
+    findings: Mapped[list["ValidationFinding"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ValidationFinding.id",
+    )
 
     @property
     def current(self) -> "RequirementVersion":
         return self.versions[-1]
+
+    @property
+    def open_findings(self) -> int:
+        """Findings no person has rejected."""
+        return sum(1 for f in self.findings if f.status != "rejected")
+
+    @property
+    def has_issues(self) -> bool:
+        """A closed requirement (rejected, merged) needs no more work, whatever the rules found."""
+        return self.status not in ("rejected", "merged") and bool(self.open_findings or self.quality_failed)
 
 
 class RequirementVersion(Base):

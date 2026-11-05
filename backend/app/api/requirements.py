@@ -1,4 +1,5 @@
-"""Requirements of a project: AI extraction, list, edit (new version), accept / reject / merge, undo / restore.
+"""Requirements of a project: AI extraction, list, edit (new version), accept / reject / merge, undo / restore,
+rule-based validation.
 
 Owner only.
 """
@@ -10,8 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentUser, DbSession, OptionalLLM, OwnedProject
-from app.models import Project, Requirement, RequirementSource, RequirementVersion
+from app.models import Project, Requirement, RequirementSource, RequirementVersion, ValidationFinding
 from app.nlp.extraction import extract_requirements
+from app.nlp.validate import validate_project, validate_requirement
 from app.schemas.extraction import ExtractResult
 from app.schemas.requirement import (
     BulkRequest,
@@ -28,6 +30,8 @@ from app.schemas.requirement import (
     RequirementType,
     RequirementUpdate,
     RequirementVersionOut,
+    ValidateResult,
+    ValidationFindingOut,
 )
 
 router = APIRouter(prefix="/projects/{project_id}/requirements", tags=["requirements"])
@@ -37,6 +41,7 @@ NO_LLM_CONFIGURED = "No AI model is configured. Set GROQ_API_KEY, or LLM_MODEL a
 _LOAD = (
     selectinload(Requirement.versions).selectinload(RequirementVersion.created_by),
     selectinload(Requirement.sources).selectinload(RequirementSource.message),
+    selectinload(Requirement.findings),
 )
 
 
@@ -72,6 +77,12 @@ def _out(r: Requirement) -> RequirementOut:
         current=RequirementVersionOut.model_validate(r.current),
         version_count=len(r.versions),
         sources=[RequirementSourceOut(**_source(s)) for s in r.sources],
+        quality_score=r.quality_score,
+        quality_failed=r.quality_failed,
+        module_name=r.module_name,
+        module_score=r.module_score,
+        open_findings=r.open_findings,
+        has_issues=r.has_issues,
     )
 
 
@@ -80,6 +91,7 @@ def _detail(r: Requirement) -> RequirementDetail:
         **_out(r).model_dump(exclude={"sources"}),
         sources=[RequirementSourceDetail(**_source(s), message_text=s.message.text) for s in r.sources],
         versions=[RequirementVersionOut.model_validate(v) for v in r.versions],
+        findings=[ValidationFindingOut.model_validate(f) for f in r.findings],
     )
 
 
@@ -102,7 +114,7 @@ def extract(
     Always gives a result: without a configured or answering AI model the rule-based fallback is used.
     """
     body = body or ExtractRequest()
-    return extract_requirements(
+    result = extract_requirements(
         db,
         project,
         llm,
@@ -110,6 +122,17 @@ def extract(
         message_ids=body.message_ids,
         llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
     )
+    validate_project(db, project, only_new=True)
+    db.commit()
+    return result
+
+
+@router.post("/validate", response_model=ValidateResult)
+def validate(project: OwnedProject, db: DbSession) -> ValidateResult:
+    """Run the validation rules on every requirement, for example after the modules changed."""
+    result = validate_project(db, project)
+    db.commit()
+    return result
 
 
 @router.post("/bulk", response_model=BulkResult)
@@ -164,6 +187,19 @@ def list_requirements(
     return [r for r in items if r.current.type == type_] if type_ else items
 
 
+@router.get("/findings", response_model=list[ValidationFindingOut])
+def list_findings(project: OwnedProject, db: DbSession) -> list[ValidationFinding]:
+    """All findings of the project, by requirement."""
+    return list(
+        db.scalars(
+            select(ValidationFinding)
+            .join(ValidationFinding.requirement)
+            .where(Requirement.project_id == project.id)
+            .order_by(Requirement.number, ValidationFinding.id)
+        )
+    )
+
+
 @router.get("/{requirement_id}", response_model=RequirementDetail)
 def get_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
     return _detail(_get(db, project, requirement_id))
@@ -198,6 +234,7 @@ def edit_requirement(
     )
     requirement.status = "edited"
     requirement.previous_status = None  # an undo must not jump over this edit
+    validate_requirement(requirement, project)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -276,12 +313,16 @@ def restore_requirement(requirement_id: int, project: OwnedProject, db: DbSessio
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail=f"{requirement.code} is not rejected or merged, so it cannot be restored"
         )
+    target = None
     if requirement.status == "merged":
         _take_back_merged_sources(db, project, requirement)
+        target = _get(db, project, requirement.merged_into_id) if requirement.merged_into_id else None
     requirement.status = "suggested"
     requirement.merged_into_id = None
     requirement.reject_reason = None
     requirement.previous_status = None
+    if target is not None:  # it lost source sentences
+        validate_requirement(target, project)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -314,5 +355,6 @@ def merge_requirements(
         other.merged_into_id = target.id
         other.previous_status = None
     target.previous_status = None
+    validate_requirement(target, project)  # it gained source sentences
     db.commit()
     return _detail(_get(db, project, requirement_id))

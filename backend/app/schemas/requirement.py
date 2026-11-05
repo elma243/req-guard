@@ -51,6 +51,29 @@ class RequirementSourceDetail(RequirementSourceOut):
     message_text: str
 
 
+class FailedCriterion(BaseModel):
+    criterion: str
+    points: int
+    reason: str
+
+
+class ValidationFindingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    requirement_id: int
+    # The requirement version that was checked
+    version: int
+    category: Literal["vague", "missing_info", "out_of_scope", "module_alignment"]
+    rule: str
+    severity: Literal["low", "medium", "high"]
+    reason: str
+    evidence: str
+    origin: Literal["ai", "user"]
+    status: Literal["suggested", "accepted", "edited", "rejected"]
+    created_at: UtcDatetime
+
+
 class RequirementOut(BaseModel):
     id: int
     code: str
@@ -64,11 +87,19 @@ class RequirementOut(BaseModel):
     current: RequirementVersionOut
     version_count: int
     sources: list[RequirementSourceOut]
+    # From the latest validation; quality_score is None until the first one
+    quality_score: int | None
+    quality_failed: list[FailedCriterion]
+    module_name: str | None
+    module_score: float | None
+    open_findings: int
+    has_issues: bool
 
 
 class RequirementDetail(RequirementOut):
     sources: list[RequirementSourceDetail]
     versions: list[RequirementVersionOut]  # oldest first
+    findings: list[ValidationFindingOut]
 
 
 class RequirementUpdate(BaseModel):
@@ -111,3 +142,11 @@ class BulkSkipped(BaseModel):
 class BulkResult(BaseModel):
     updated: list[RequirementOut]
     skipped: list[BulkSkipped]
+
+
+class ValidateResult(BaseModel):
+    validated: int
+    # Open requirements with findings or failed criteria
+    with_issues: int
+    # Findings not rejected by a person
+    findings: int

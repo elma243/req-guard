@@ -61,6 +61,23 @@ export function Confidence({ value }: { value: number | null }) {
   return value === null ? <span className="text-zinc-600">—</span> : <>{Math.round(value * 100)}%</>;
 }
 
+export const SCORE_NOTE = "Based on ISO/IEC/IEEE 29148 characteristics, from rule checks only.";
+
+export function ScoreBadge({ score }: { score: number | null }) {
+  if (score === null) return <span className="text-zinc-600" title="Not validated yet">—</span>;
+  const style =
+    score >= 80
+      ? "bg-emerald-400/10 text-emerald-300 ring-emerald-400/30"
+      : score >= 50
+        ? "bg-amber-400/10 text-amber-300 ring-amber-400/30"
+        : "bg-rose-400/10 text-rose-300 ring-rose-400/30";
+  return (
+    <span className={`${BADGE} tabular-nums ${style}`} title={`Quality score. ${SCORE_NOTE}`}>
+      {score}
+    </span>
+  );
+}
+
 export function Kbd({ children }: { children: React.ReactNode }) {
   return (
     <kbd className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">

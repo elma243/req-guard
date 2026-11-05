@@ -89,10 +89,13 @@ export type Project = {
   name: string;
   description: string;
   scope_text: string;
+  modules: ProjectModule[];
   owner_id: number;
   created_at: string;
   updated_at: string;
 };
+
+export type ProjectModule = { name: string; description: string };
 
 export type ProjectInput = Pick<Project, "name" | "description" | "scope_text">;
 
@@ -108,7 +111,7 @@ export function getProject(id: number | string) {
   return apiFetch<Project>(`/projects/${id}`);
 }
 
-export function updateProject(id: number | string, data: Partial<ProjectInput>) {
+export function updateProject(id: number | string, data: Partial<ProjectInput> & Pick<Partial<Project>, "modules">) {
   return apiFetch<Project>(`/projects/${id}`, { method: "PATCH", body: json(data) });
 }
 
@@ -321,18 +324,47 @@ export type Requirement = {
   current: RequirementVersion;
   version_count: number;
   sources: RequirementSource[];
+  quality_score: number | null; // 0-100; null until the first validation
+  quality_failed: FailedCriterion[];
+  module_name: string | null; // best-matching module
+  module_score: number | null; // 0-1
+  open_findings: number; // findings not rejected by a person
+  has_issues: boolean; // open requirement with findings or failed criteria
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
   sources: (RequirementSource & { message_text: string })[];
   versions: RequirementVersion[]; // oldest first
+  findings: ValidationFinding[];
 };
 
 export type RequirementUpdate = {
   statement?: string;
   type?: RequirementType;
   nfr_category?: NfrCategory | null;
+  actor?: string;
 };
+
+export type FailedCriterion = { criterion: string; points: number; reason: string };
+
+export type FindingCategory = "vague" | "missing_info" | "out_of_scope" | "module_alignment";
+export type FindingSeverity = "low" | "medium" | "high";
+
+export type ValidationFinding = {
+  id: number;
+  requirement_id: number;
+  version: number; // the requirement version that was checked
+  category: FindingCategory;
+  rule: string;
+  severity: FindingSeverity;
+  reason: string;
+  evidence: string; // the matched word or the client's sentence
+  origin: "ai" | "user";
+  status: "suggested" | "accepted" | "edited" | "rejected";
+  created_at: string;
+};
+
+export type ValidateResult = { validated: number; with_issues: number; findings: number };
 
 export const BULK_LIMIT = 200;
 export type BulkAction = "accept" | "reject" | "undo";
@@ -363,6 +395,11 @@ export function extractRequirements(projectId: number | string, options: { force
     method: "POST",
     body: json({ force: options.force ?? false }),
   });
+}
+
+// Runs the validation rules on every requirement of the project
+export function validateRequirements(projectId: number | string) {
+  return apiFetch<ValidateResult>(`/projects/${projectId}/requirements/validate`, { method: "POST" });
 }
 
 export function listRequirements(

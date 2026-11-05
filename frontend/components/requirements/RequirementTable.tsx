@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import type { Requirement } from "@/lib/api";
-import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
+import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, ScoreBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
 
 type TableProps = {
   rows: Requirement[];
@@ -94,6 +94,9 @@ export function TableSkeleton() {
             <div className="h-3 w-12 rounded bg-white/5" />
           </td>
           <td className="px-4 py-4">
+            <div className="h-5 w-8 rounded-full bg-white/5" />
+          </td>
+          <td className="px-4 py-4">
             <div className="h-5 w-16 rounded-full bg-white/5" />
           </td>
         </tr>
@@ -123,6 +126,7 @@ function TableShell({
             <th className={HEAD}>Requirement and source</th>
             {!compact && <th className={`w-36 ${HEAD}`}>Type</th>}
             {!compact && <th className={`w-36 ${HEAD}`}>Confidence</th>}
+            <th className={`w-20 ${HEAD}`}>Score</th>
             <th className={`w-32 ${HEAD}`}>Status</th>
           </tr>
         </thead>
@@ -216,6 +220,9 @@ function Row({
           </div>
         </td>
       )}
+      <td className="px-4 py-3">
+        <ScoreBadge score={r.quality_score} />
+      </td>
       <td className="px-4 py-3">
         <StatusBadge status={r.status} />
         <div className="mt-1.5">

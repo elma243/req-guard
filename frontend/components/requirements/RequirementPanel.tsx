@@ -2,6 +2,7 @@
 
 import { ErrorBanner, secondaryButton } from "@/components/ui";
 import type { Requirement, RequirementDetail } from "@/lib/api";
+import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
 import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
 
@@ -76,6 +77,17 @@ export default function RequirementPanel({
             <p className="mt-3 text-xs text-zinc-400">Merged here: {mergedHere.map((m) => m.code).join(", ")}</p>
           )}
         </section>
+
+        <Section title="Quality and findings">
+          <div className="space-y-3">
+            <QualitySummary requirement={r} />
+            {detail?.data ? (
+              <FindingList detail={detail.data} />
+            ) : (
+              <Loading detail={detail} what="findings" onRetry={onRetry} />
+            )}
+          </div>
+        </Section>
 
         <Section title="Source messages">
           {detail?.data ? (

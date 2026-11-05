@@ -3,8 +3,16 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import ModulesEditor from "@/components/ModulesEditor";
 import { ErrorBanner, Label, dangerButton, errorText, inputClass, primaryButton } from "@/components/ui";
-import { deleteProject, getProject, updateProject, type Project, type ProjectInput } from "@/lib/api";
+import {
+  deleteProject,
+  getProject,
+  updateProject,
+  type Project,
+  type ProjectInput,
+  type ProjectModule,
+} from "@/lib/api";
 import { setSelectedProject } from "@/lib/selectedProject";
 
 export default function ProjectDetailPage() {
@@ -12,6 +20,7 @@ export default function ProjectDetailPage() {
   const router = useRouter();
   const [project, setProject] = useState<Project | null>(null);
   const [form, setForm] = useState<ProjectInput>({ name: "", description: "", scope_text: "" });
+  const [modules, setModules] = useState<ProjectModule[]>([]);
   const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -23,6 +32,7 @@ export default function ProjectDetailPage() {
         setProject(p);
         setSelectedProject(p.id); // opening a project also makes it the sidebar selection
         setForm({ name: p.name, description: p.description, scope_text: p.scope_text });
+        setModules(p.modules);
       })
       .catch((err) => setLoadError(errorText(err)));
   }, [id]);
@@ -33,12 +43,19 @@ export default function ProjectDetailPage() {
       setError("Project name is required.");
       return;
     }
+    // Empty rows are dropped; a description without a name is a mistake
+    const filled = modules.filter((m) => m.name.trim() || m.description.trim());
+    if (filled.some((m) => !m.name.trim())) {
+      setError("Every module needs a name.");
+      return;
+    }
     setBusy(true);
     setError("");
     setSaved(false);
     try {
-      const p = await updateProject(id, { ...form, name: form.name.trim() });
+      const p = await updateProject(id, { ...form, name: form.name.trim(), modules: filled });
       setProject(p);
+      setModules(p.modules);
       setSaved(true);
     } catch (err) {
       setError(errorText(err));
@@ -114,8 +131,9 @@ export default function ProjectDetailPage() {
             className={inputClass}
           />
         </div>
+        <ModulesEditor modules={modules} onChange={setModules} />
         <ErrorBanner message={error} />
-        {saved && <p className="text-sm text-emerald-300">Saved.</p>}
+        {saved &&<p className="text-sm text-emerald-300">Saved.</p>}
         <div className="flex justify-between gap-3">
           <button type="submit" disabled={busy} className={primaryButton}>
             Save changes

@@ -6,6 +6,7 @@ from app.models.requirement import Requirement, RequirementSource, RequirementVe
 from app.models.source import Source
 from app.models.team_member import TEAM_ROLES, TeamMember
 from app.models.user import User
+from app.models.validation import ValidationFinding
 
 __all__ = [
     "Message",
@@ -17,4 +18,5 @@ __all__ = [
     "TEAM_ROLES",
     "TeamMember",
     "User",
+    "ValidationFinding",
 ]

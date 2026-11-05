@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import func, select
 
 from app.models import TeamMember
@@ -88,3 +89,57 @@ def test_owner_can_delete_and_team_is_deleted(client, make_user, db_session_fact
     assert client.get(f"/projects/{project['id']}", headers=headers).status_code == 404
     with db_session_factory() as db:
         assert db.scalar(select(func.count()).select_from(TeamMember)) == 0
+
+
+MODULES = [{"name": "Payments", "description": "bKash, cards, refunds"}, {"name": "Reports", "description": ""}]
+
+
+def test_new_project_has_no_modules(client, make_user):
+    _, headers = make_user()
+    assert create_project(client, headers)["modules"] == []
+
+
+def test_modules_are_saved_and_replaced_as_a_list(client, make_user):
+    _, headers = make_user()
+    base = f"/projects/{create_project(client, headers)['id']}"
+
+    res = client.patch(base, json={"modules": MODULES}, headers=headers)
+    assert res.status_code == 200, res.text
+    assert client.get(base, headers=headers).json()["modules"] == MODULES
+
+    # A change to another field leaves them alone; an empty list clears them
+    assert client.patch(base, json={"name": "New name"}, headers=headers).json()["modules"] == MODULES
+    assert client.patch(base, json={"modules": []}, headers=headers).json()["modules"] == []
+
+
+def test_module_names_are_trimmed_and_can_be_bangla(client, make_user):
+    _, headers = make_user()
+    base = f"/projects/{create_project(client, headers)['id']}"
+
+    res = client.patch(base, json={"modules": [{"name": "  পেমেন্ট ", "description": " বিকাশ "}]}, headers=headers)
+
+    assert res.json()["modules"] == [{"name": "পেমেন্ট", "description": "বিকাশ"}]
+
+
+def test_project_can_be_created_with_modules(client, make_user):
+    _, headers = make_user()
+    assert create_project(client, headers, modules=MODULES)["modules"] == MODULES
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [
+        [{"name": "", "description": "no name"}],
+        [{"name": "   "}],
+        [{"name": "x" * 101}],
+        [{"name": "Payments", "description": "x" * 2001}],
+        [{"name": "Payments"}, {"name": "payments"}],
+        [{"name": f"Module {n}"} for n in range(51)],
+    ],
+)
+def test_invalid_modules_are_refused(client, make_user, modules):
+    _, headers = make_user()
+    base = f"/projects/{create_project(client, headers)['id']}"
+
+    assert client.patch(base, json={"modules": modules}, headers=headers).status_code == 422
+    assert client.get(base, headers=headers).json()["modules"] == []
