@@ -30,6 +30,16 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert {"ck_requirements_origin", "ck_requirements_status"} <= requirement_checks
     assert {"reject_reason", "previous_status"} <= {c["name"] for c in inspect(engine).get_columns("requirements")}
     assert "merged_from_id" in {c["name"] for c in inspect(engine).get_columns("requirement_sources")}
+    assert "validation_findings" in inspect(engine).get_table_names()
+    assert {c["name"] for c in inspect(engine).get_check_constraints("validation_findings")} == {
+        "ck_validation_findings_category",
+        "ck_validation_findings_severity",
+        "ck_validation_findings_origin",
+        "ck_validation_findings_status",
+    }
+    assert {"quality_score", "quality_failed", "module_name", "module_score"} <= {
+        c["name"] for c in inspect(engine).get_columns("requirements")
+    }
 
     # Deleting a project removes its sources and messages in the database itself
     def on_delete(table: str, referred: str) -> str | None:
@@ -42,6 +52,7 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("requirements", "projects") == "CASCADE"
     assert on_delete("requirement_versions", "requirements") == "CASCADE"
     assert on_delete("requirement_sources", "messages") == "CASCADE"
+    assert on_delete("validation_findings", "requirements") == "CASCADE"
     merged_from = [
         fk
         for fk in inspect(engine).get_foreign_keys("requirement_sources")
