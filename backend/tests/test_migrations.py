@@ -28,6 +28,8 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert "requirement_counter" in {c["name"] for c in inspect(engine).get_columns("projects")}
     requirement_checks = {c["name"] for c in inspect(engine).get_check_constraints("requirements")}
     assert {"ck_requirements_origin", "ck_requirements_status"} <= requirement_checks
+    assert {"reject_reason", "previous_status"} <= {c["name"] for c in inspect(engine).get_columns("requirements")}
+    assert "merged_from_id" in {c["name"] for c in inspect(engine).get_columns("requirement_sources")}
 
     # Deleting a project removes its sources and messages in the database itself
     def on_delete(table: str, referred: str) -> str | None:
@@ -40,6 +42,12 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("requirements", "projects") == "CASCADE"
     assert on_delete("requirement_versions", "requirements") == "CASCADE"
     assert on_delete("requirement_sources", "messages") == "CASCADE"
+    merged_from = [
+        fk
+        for fk in inspect(engine).get_foreign_keys("requirement_sources")
+        if fk["constrained_columns"] == ["merged_from_id"]
+    ]
+    assert [(fk["referred_table"], fk["options"].get("ondelete")) for fk in merged_from] == [("requirements", "SET NULL")]
 
     command.downgrade(config, "base")
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}

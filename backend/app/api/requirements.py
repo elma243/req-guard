@@ -1,4 +1,7 @@
-"""Requirements of a project: AI extraction, list, edit (new version), accept / reject / merge. Owner only."""
+"""Requirements of a project: AI extraction, list, edit (new version), accept / reject / merge, undo / restore.
+
+Owner only.
+"""
 
 from typing import Annotated
 
@@ -11,10 +14,15 @@ from app.models import Project, Requirement, RequirementSource, RequirementVersi
 from app.nlp.extraction import extract_requirements
 from app.schemas.extraction import ExtractResult
 from app.schemas.requirement import (
+    BulkRequest,
+    BulkResult,
+    BulkSkipped,
     ExtractRequest,
     MergeRequest,
+    RejectRequest,
     RequirementDetail,
     RequirementOut,
+    RequirementSourceDetail,
     RequirementSourceOut,
     RequirementStatus,
     RequirementType,
@@ -27,7 +35,7 @@ router = APIRouter(prefix="/projects/{project_id}/requirements", tags=["requirem
 NO_LLM_CONFIGURED = "No AI model is configured. Set GROQ_API_KEY, or LLM_MODEL and LLM_API_KEY, in backend/.env."
 
 _LOAD = (
-    selectinload(Requirement.versions),
+    selectinload(Requirement.versions).selectinload(RequirementVersion.created_by),
     selectinload(Requirement.sources).selectinload(RequirementSource.message),
 )
 
@@ -39,6 +47,18 @@ def _get(db: Session, project: Project, requirement_id: int) -> Requirement:
     return requirement
 
 
+def _source(s: RequirementSource) -> dict:
+    return {
+        "message_id": s.message_id,
+        "source_sentence": s.source_sentence,
+        "source": s.message.source,
+        "channel": s.message.channel,
+        "author": s.message.author,
+        "sent_at": s.message.sent_at,
+        "merged_from_id": s.merged_from_id,
+    }
+
+
 def _out(r: Requirement) -> RequirementOut:
     return RequirementOut(
         id=r.id,
@@ -46,27 +66,20 @@ def _out(r: Requirement) -> RequirementOut:
         origin=r.origin,
         status=r.status,
         merged_into_id=r.merged_into_id,
+        reject_reason=r.reject_reason if r.status == "rejected" else None,
         created_at=r.created_at,
         updated_at=r.updated_at,
         current=RequirementVersionOut.model_validate(r.current),
         version_count=len(r.versions),
-        sources=[
-            RequirementSourceOut(
-                message_id=s.message_id,
-                source_sentence=s.source_sentence,
-                source=s.message.source,
-                channel=s.message.channel,
-                author=s.message.author,
-                sent_at=s.message.sent_at,
-            )
-            for s in r.sources
-        ],
+        sources=[RequirementSourceOut(**_source(s)) for s in r.sources],
     )
 
 
 def _detail(r: Requirement) -> RequirementDetail:
     return RequirementDetail(
-        **_out(r).model_dump(), versions=[RequirementVersionOut.model_validate(v) for v in r.versions]
+        **_out(r).model_dump(exclude={"sources"}),
+        sources=[RequirementSourceDetail(**_source(s), message_text=s.message.text) for s in r.sources],
+        versions=[RequirementVersionOut.model_validate(v) for v in r.versions],
     )
 
 
@@ -97,6 +110,43 @@ def extract(
         message_ids=body.message_ids,
         llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
     )
+
+
+@router.post("/bulk", response_model=BulkResult)
+def bulk_review(body: BulkRequest, project: OwnedProject, db: DbSession) -> BulkResult:
+    """Accept, reject or undo many at once, in one transaction.
+
+    An id outside this project fails the whole call and changes nothing. A requirement the action does not
+    apply to (merged, already in that status, nothing to undo) is skipped and reported.
+    """
+    ids = list(dict.fromkeys(body.ids))
+    found = {
+        r.id: r
+        for r in db.scalars(
+            select(Requirement).where(Requirement.project_id == project.id, Requirement.id.in_(ids)).options(*_LOAD)
+        ).all()
+    }
+    if len(found) != len(ids):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Requirement not found")
+
+    new_status = {"accept": "accepted", "reject": "rejected"}.get(body.action)
+    updated: list[Requirement] = []
+    skipped: list[BulkSkipped] = []
+    for requirement in (found[rid] for rid in ids):
+        if requirement.status == new_status:
+            skipped.append(BulkSkipped(id=requirement.id, code=requirement.code, reason=f"Already {new_status}"))
+            continue
+        try:
+            if new_status:
+                _review(requirement, new_status, body.reason)
+            else:
+                _undo(requirement)
+        except HTTPException as exc:
+            skipped.append(BulkSkipped(id=requirement.id, code=requirement.code, reason=exc.detail))
+        else:
+            updated.append(requirement)
+    db.commit()
+    return BulkResult(updated=[_out(_get(db, project, r.id)) for r in updated], skipped=skipped)
 
 
 @router.get("", response_model=list[RequirementOut])
@@ -147,26 +197,93 @@ def edit_requirement(
         )
     )
     requirement.status = "edited"
+    requirement.previous_status = None  # an undo must not jump over this edit
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
 
-def _set_status(db: Session, project: Project, requirement_id: int, new_status: str) -> RequirementDetail:
-    requirement = _get(db, project, requirement_id)
+def _review(requirement: Requirement, new_status: str, reason: str | None = None) -> None:
+    """Accept or reject. Repeating one changes no status, so undo still goes to the real previous status."""
     _ensure_changeable(requirement, editing=False)
-    requirement.status = new_status
-    db.commit()
-    return _detail(_get(db, project, requirement_id))
+    if new_status == "rejected":
+        requirement.reject_reason = reason or None
+    if requirement.status != new_status:
+        requirement.previous_status = requirement.status
+        requirement.status = new_status
+
+
+def _undo(requirement: Requirement) -> None:
+    _ensure_changeable(requirement, editing=False)
+    if requirement.previous_status is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"{requirement.code} has nothing to undo")
+    requirement.status = requirement.previous_status
+    requirement.previous_status = None
 
 
 @router.post("/{requirement_id}/accept", response_model=RequirementDetail)
 def accept_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
-    return _set_status(db, project, requirement_id, "accepted")
+    _review(_get(db, project, requirement_id), "accepted")
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
 
 
 @router.post("/{requirement_id}/reject", response_model=RequirementDetail)
-def reject_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
-    return _set_status(db, project, requirement_id, "rejected")
+def reject_requirement(
+    requirement_id: int, project: OwnedProject, db: DbSession, body: RejectRequest | None = None
+) -> RequirementDetail:
+    _review(_get(db, project, requirement_id), "rejected", body.reason if body else None)
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
+
+
+@router.post("/{requirement_id}/undo", response_model=RequirementDetail)
+def undo_review(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+    """Take back the last accept / reject: the status returns to what it was."""
+    _undo(_get(db, project, requirement_id))
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
+
+
+def _take_back_merged_sources(db: Session, project: Project, requirement: Requirement) -> None:
+    """Remove the source rows a merge copied from `requirement` to its target.
+
+    A row stays when another requirement still merged into that target has the same sentence.
+    """
+    if requirement.merged_into_id is None:
+        return
+    target = _get(db, project, requirement.merged_into_id)
+    still_merged = db.scalars(
+        select(Requirement)
+        .where(Requirement.merged_into_id == target.id, Requirement.id != requirement.id)
+        .options(selectinload(Requirement.sources))
+    ).all()
+    for row in [s for s in target.sources if s.merged_from_id == requirement.id]:
+        key = (row.message_id, row.source_sentence)
+        holder = next(
+            (r for r in still_merged if key in {(s.message_id, s.source_sentence) for s in r.sources}), None
+        )
+        if holder is None:
+            target.sources.remove(row)
+        else:
+            row.merged_from_id = holder.id
+
+
+@router.post("/{requirement_id}/restore", response_model=RequirementDetail)
+def restore_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+    """Bring a rejected or merged requirement back to "suggested" for a new review."""
+    requirement = _get(db, project, requirement_id)
+    if requirement.status not in ("rejected", "merged"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail=f"{requirement.code} is not rejected or merged, so it cannot be restored"
+        )
+    if requirement.status == "merged":
+        _take_back_merged_sources(db, project, requirement)
+    requirement.status = "suggested"
+    requirement.merged_into_id = None
+    requirement.reject_reason = None
+    requirement.previous_status = None
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
 
 
 @router.post("/{requirement_id}/merge", response_model=RequirementDetail)
@@ -187,9 +304,15 @@ def merge_requirements(
     for other in others:
         for s in other.sources:
             if (s.message_id, s.source_sentence) not in have:
-                target.sources.append(RequirementSource(message_id=s.message_id, source_sentence=s.source_sentence))
+                target.sources.append(
+                    RequirementSource(
+                        message_id=s.message_id, source_sentence=s.source_sentence, merged_from_id=other.id
+                    )
+                )
                 have.add((s.message_id, s.source_sentence))
         other.status = "merged"
         other.merged_into_id = target.id
+        other.previous_status = None
+    target.previous_status = None
     db.commit()
     return _detail(_get(db, project, requirement_id))

@@ -29,6 +29,8 @@ class RequirementVersionOut(BaseModel):
     ai_model: str | None
     origin: Literal["ai", "user"]
     created_by_id: int | None
+    # None for AI versions and for users who were deleted
+    created_by_name: str | None
     created_at: UtcDatetime
 
 
@@ -40,6 +42,13 @@ class RequirementSourceOut(BaseModel):
     channel: str
     author: str
     sent_at: UtcDatetime
+    # The requirement this sentence came from through a merge; None for its own sentences
+    merged_from_id: int | None
+
+
+class RequirementSourceDetail(RequirementSourceOut):
+    # The whole message, to show the sentence in its context
+    message_text: str
 
 
 class RequirementOut(BaseModel):
@@ -48,6 +57,8 @@ class RequirementOut(BaseModel):
     origin: Literal["ai", "user"]
     status: RequirementStatus
     merged_into_id: int | None
+    # Only while the status is "rejected"
+    reject_reason: str | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
     current: RequirementVersionOut
@@ -56,6 +67,7 @@ class RequirementOut(BaseModel):
 
 
 class RequirementDetail(RequirementOut):
+    sources: list[RequirementSourceDetail]
     versions: list[RequirementVersionOut]  # oldest first
 
 
@@ -74,6 +86,28 @@ class RequirementUpdate(BaseModel):
         return self
 
 
+class RejectRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
+
+
 class MergeRequest(BaseModel):
     # Requirements folded into this one; their source sentences are added to it
     other_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class BulkRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=200)
+    action: Literal["accept", "reject", "undo"]
+    # Only for "reject"; the same reason for all of them
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
+
+
+class BulkSkipped(BaseModel):
+    id: int
+    code: str
+    reason: str
+
+
+class BulkResult(BaseModel):
+    updated: list[RequirementOut]
+    skipped: list[BulkSkipped]
