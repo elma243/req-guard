@@ -124,3 +124,14 @@ STOP_WORDS = {
     "হবে", "লাগবে", "করতে", "পারবে", "চাই", "আমি", "আমরা", "আমাদের", "আপনার", "থাকবে", "যাবে", "করে", "করা", "জন্য", "থেকে",
     "দিয়ে", "এবং", "সব", "দিতে", "হতে",
 }  # fmt: skip
+
+# ---------- one need per requirement ----------
+
+# "and" before one of these starts a second action: "export orders and send invoices". English only: in Bangla
+# and Banglish a second action shows as a second cue word ("korte parbe ... korte parbe").
+ACTION_VERBS = {
+    "add", "approve", "assign", "calculate", "cancel", "check", "create", "delete", "display", "download", "edit",
+    "enable", "export", "filter", "generate", "import", "manage", "notify", "pay", "print", "provide", "reject",
+    "remove", "save", "schedule", "search", "send", "show", "sort", "store", "sync", "track", "update", "upload",
+    "validate", "verify", "view",
+}  # fmt: skip

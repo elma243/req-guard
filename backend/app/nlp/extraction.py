@@ -208,6 +208,10 @@ def has_requirement_cue(sentence: str) -> bool:
     return _CUES.search(sentence) is not None
 
 
+def count_requirement_cues(sentence: str) -> int:
+    return len(_CUES.findall(sentence))
+
+
 def rule_based_answer(sentences: list[Sentence]) -> ExtractionAnswer:
     """One requirement per sentence with a cue word, its text the source sentence itself."""
     return ExtractionAnswer(

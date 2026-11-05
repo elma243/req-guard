@@ -13,7 +13,9 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from app.nlp.extraction import count_requirement_cues, has_requirement_cue
 from app.nlp.lexicon import (
+    ACTION_VERBS,
     ACTOR_WORDS,
     ACTOR_WORDS_BANGLA,
     COMPARATORS,
@@ -199,7 +201,8 @@ def best_module(item: RequirementInput) -> tuple[str, float] | None:
 
 
 def _covered_by_scope(item: RequirementInput) -> bool:
-    words = _content_words(item.statement)
+    # Who wants it says nothing about scope: "customer" in the scope text must not cover "the customer plays music"
+    words = _content_words(_ACTOR.sub(" ", _normal(item.statement)))
     return not words or _hits(words, _content_words(item.scope_text)) / len(words) >= SCOPE_COVERAGE
 
 
@@ -215,3 +218,78 @@ def check_alignment(item: RequirementInput, module: tuple[str, float] | None) ->
         reason = "Possible extra work: this may be outside the agreed project scope."
         drafts.append(Draft("out_of_scope", "possible_out_of_scope", "medium", reason, item.evidence))
     return drafts
+
+
+def run_rules(item: RequirementInput) -> tuple[list[Draft], tuple[str, float] | None]:
+    """All findings of a requirement and its best-matching module."""
+    module = best_module(item)
+    return [*check_vague(item), *check_missing_info(item), *check_alignment(item, module)], module
+
+
+# ---------- one need per requirement ----------
+
+_ABBREVIATION = re.compile(r"(?<![\w.])(?:e\.g|i\.e|etc|vs)\.", re.IGNORECASE)
+_NEXT_SENTENCE = re.compile(r"[.!?।;]\s+\S")
+_SECOND_ACTION = re.compile(
+    rf"(?<![{_WORD_CHARS}])(?:and(?:\s+then|\s+also)?|then|as\s+well\s+as)\s+"
+    rf"(?:{_alternatives(ACTION_VERBS)})(?![{_WORD_CHARS}])",
+    re.IGNORECASE,
+)
+
+
+def is_singular(statement: str) -> bool:
+    """False when the statement may hold more than one need."""
+    text = _normal(statement)
+    return (
+        count_requirement_cues(text) < 2
+        and _NEXT_SENTENCE.search(_ABBREVIATION.sub("", text)) is None
+        and _SECOND_ACTION.search(text) is None
+    )
+
+
+# ---------- quality score ----------
+
+
+def score_quality(item: RequirementInput, findings: Iterable[Draft]) -> tuple[int, list[dict]]:
+    """Score 0-100 and the failed criteria, from the ISO/IEC/IEEE 29148 characteristics rules can check.
+
+    Necessary, feasible and correct need a person, so they are not scored. A criterion that does not apply
+    (passed is None) leaves the total: the score is passed points / applicable points.
+    """
+    rules = {f.rule for f in findings}
+    aligned_applies = bool(item.modules or item.scope_text.strip())
+    criteria = (
+        ("unambiguous", 25, "vague_word" not in rules, "Some wording may be vague."),
+        (
+            "verifiable",
+            25,
+            not rules & {"no_measurable_value", "missing_limit"},
+            "This may be hard to verify: a value or a limit may be missing.",
+        ),
+        (
+            "has_actor",
+            15,
+            "no_actor" not in rules if item.type == "functional" else None,
+            "It may be unclear who needs this.",
+        ),
+        ("singular", 15, is_singular(item.statement), "This may hold more than one need."),
+        (
+            "conforming",
+            10,
+            has_requirement_cue(_normal(item.statement)),
+            'This may not use requirement wording such as "shall".',
+        ),
+        (
+            "aligned",
+            10,
+            not rules & {"no_matching_module", "possible_out_of_scope"} if aligned_applies else None,
+            "This may not fit the modules or the scope of the project.",
+        ),
+    )
+    applicable = [c for c in criteria if c[2] is not None]
+    passed = sum(points for _, points, ok, _ in applicable if ok)
+    total = sum(points for _, points, _, _ in applicable)
+    failed = [
+        {"criterion": name, "points": points, "reason": reason} for name, points, ok, reason in applicable if not ok
+    ]
+    return round(100 * passed / total), failed
