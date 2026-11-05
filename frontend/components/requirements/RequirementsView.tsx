@@ -177,7 +177,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
       const { validated, with_issues } = await validateRequirements(projectId);
       refreshList();
       setDetailReload((n) => n + 1);
-      show("info", `Validated ${validated}. ${with_issues} may have issues.`);
+      show("info", `Validated ${validated} requirements. ${with_issues} may have issues.`);
     } catch (err) {
       show("error", `Could not validate: ${errorText(err)}`);
     } finally {
