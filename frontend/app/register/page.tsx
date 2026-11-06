@@ -41,7 +41,7 @@ export default function RegisterPage() {
 
     setLoading(true);
     try {
-      await register(values.name.trim(), values.email.trim(), values.password);
+      await register({ name: values.name.trim(), email: values.email.trim(), password: values.password, confirm_password: values.confirm });
       router.replace("/projects");
       router.refresh();
     } catch (err) {

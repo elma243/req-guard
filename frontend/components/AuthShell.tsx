@@ -1,4 +1,4 @@
-// Shared frame for /login and /register: background, product story on the left, form card on the right.
+// Shared frame for the login, sign-up, verification and password pages: background, product story on the left, form card on the right.
 
 export default function AuthShell({ children }: { children: React.ReactNode }) {
   return (
@@ -121,9 +121,10 @@ export function SubmitButton({ loading, label, loadingLabel }: { loading: boolea
   );
 }
 
-// Only allow redirects to a path on this site (blocks "//evil.com" and "https://...").
+// Only allow redirects to a path on this site. Blocks "//evil.com" and "https://...", and also "/\evil.com",
+// because browsers read a backslash as a slash and drop tabs and line breaks.
 export function safeNextPath(next: string | null): string {
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/projects";
+  return next && next.startsWith("/") && !next.startsWith("//") && !/[\\\s]/.test(next) ? next : "/projects";
 }
 
 export function ShieldIcon({ size = 24 }: { size?: number }) {

@@ -2,7 +2,7 @@
 // The browser only ever talks to this same-origin route, so the token never reaches client JavaScript.
 
 import { NextResponse, type NextRequest } from "next/server";
-import { BACKEND_URL, TOKEN_COOKIE, backendTimeout, backendUnreachable } from "@/lib/session";
+import { BACKEND_URL, TOKEN_COOKIE, backendTimeout, backendUnreachable, clientIpHeaders } from "@/lib/session";
 
 // Longest wait for FastAPI. Must stay longer than the backend's longest request: requirement extraction
 // ends after 240 s at the latest, LLM retries included (RUN_TIME_BUDGET_SECONDS in
@@ -18,7 +18,8 @@ async function forward(request: NextRequest, { params }: Context) {
   const { path } = await params;
   const url = `${BACKEND_URL}/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
 
-  const headers = new Headers();
+  // Built from scratch, so X-Client-IP or X-Proxy-Secret sent by a browser never reach FastAPI
+  const headers = new Headers(clientIpHeaders(request));
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
   const token = request.cookies.get(TOKEN_COOKIE)?.value;
@@ -45,6 +46,8 @@ async function forward(request: NextRequest, { params }: Context) {
   const response = new NextResponse(body, { status: res.status });
   const resType = res.headers.get("content-type");
   if (resType) response.headers.set("content-type", resType);
+  const retryAfter = res.headers.get("retry-after");
+  if (retryAfter) response.headers.set("retry-after", retryAfter);
 
   // Token expired or invalid: drop the cookie so proxy.ts sends the user to /login
   if (res.status === 401) response.cookies.delete(TOKEN_COOKIE);
