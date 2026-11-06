@@ -1,4 +1,4 @@
-"""Register, verify the email, log in and read the current user."""
+"""Register, verify the email, log in, reset a forgotten password and read the current user."""
 
 import hmac
 from datetime import UTC, datetime, timedelta
@@ -11,23 +11,35 @@ from app.api.deps import CurrentUser, DbSession
 from app.connectors.base import as_utc
 from app.core import email as mailer
 from app.core.config import settings
-from app.core.ratelimit import enforce, limit_auth, limiter
+from app.core.ratelimit import client_ip, enforce, limit_auth, limiter
 from app.core.security import (
     create_access_token,
     generate_otp,
+    generate_reset_token,
     hash_password,
     hash_secret,
     verify_dummy_password,
     verify_password,
 )
-from app.models import EmailOtp, User
-from app.schemas.auth import EmailIn, LoginIn, MessageOut, RegisterIn, TokenOut, UserOut, VerifyEmailIn
+from app.models import EmailOtp, PasswordResetToken, User
+from app.schemas.auth import (
+    PASSWORD_EQUALS_EMAIL,
+    EmailIn,
+    LoginIn,
+    MessageOut,
+    RegisterIn,
+    ResetPasswordIn,
+    TokenOut,
+    UserOut,
+    VerifyEmailIn,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_EXPIRE_MINUTES = 10
 OTP_MAX_ATTEMPTS = 5
 RESEND_COOLDOWN_SECONDS = 60
+RESET_EXPIRE_MINUTES = 30
 
 EMAIL_TAKEN = "An account with this email already exists. Sign in or reset your password."
 BAD_LOGIN = "Email or password is incorrect"
@@ -35,6 +47,8 @@ NOT_VERIFIED = "Please verify your email"
 # One message for a wrong, expired or used-up code and an unknown email, so the answer reveals no account
 BAD_CODE = "That code is incorrect or has expired. Check it or request a new one."
 CODE_RESENT = "If this account still needs verifying, we sent a new code."
+RESET_SENT = "If this email exists, we sent a link"
+BAD_RESET_LINK = "This reset link is invalid or has expired. Please ask for a new one."
 
 
 def _now() -> datetime:
@@ -47,6 +61,10 @@ def _find_user(db: DbSession, email: str) -> User | None:
 
 def _otp_hash(user_id: int, code: str) -> str:
     return hash_secret(f"otp:{user_id}:{code}")
+
+
+def _reset_hash(token: str) -> str:
+    return hash_secret(f"reset:{token}")
 
 
 def _resend_key(email: str) -> str:
@@ -142,6 +160,65 @@ def login(body: LoginIn, request: Request, db: DbSession) -> TokenOut:
         access_token=create_access_token(user.id, user.token_version),
         expires_in=settings.jwt_expire_minutes * 60,
     )
+
+
+@router.post("/forgot-password", response_model=MessageOut)
+def forgot_password(body: EmailIn, request: Request, db: DbSession, background: BackgroundTasks) -> MessageOut:
+    limit_auth(request, "forgot", body.email)
+    user = _find_user(db, body.email)
+    if user is not None:
+        token = generate_reset_token()
+        db.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user.id))
+        db.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=_reset_hash(token),
+                expires_at=_now() + timedelta(minutes=RESET_EXPIRE_MINUTES),
+            )
+        )
+        db.commit()
+        # From settings, never the request's Host header, which a caller could set to their own site
+        url = f"{settings.frontend_url.rstrip('/')}/reset-password?token={token}"
+        background.add_task(mailer.deliver, user.email, mailer.reset_email(user.name, url, RESET_EXPIRE_MINUTES))
+    return MessageOut(message=RESET_SENT)
+
+
+@router.post("/reset-password", response_model=MessageOut)
+def reset_password(body: ResetPasswordIn, request: Request, db: DbSession) -> MessageOut:
+    enforce(f"reset:ip:{client_ip(request)}", settings.auth_rate_limit_per_minute, 60)
+    bad_link = HTTPException(status.HTTP_400_BAD_REQUEST, detail=BAD_RESET_LINK)
+
+    reset = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == _reset_hash(body.token)))
+    if reset is None or reset.used_at is not None or as_utc(reset.expires_at) <= _now():
+        raise bad_link
+    user = db.get(User, reset.user_id)
+    if body.password.strip().lower() == user.email:
+        # Same shape as a validation error; the schema cannot check this, it does not know the email
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{"type": "invalid", "loc": ["body", "password"], "msg": PASSWORD_EQUALS_EMAIL}],
+        )
+    password_hash = hash_password(body.password)
+
+    # Claimed in one statement, so of two requests with the same link only one gets through
+    claimed = db.execute(
+        update(PasswordResetToken)
+        .where(PasswordResetToken.id == reset.id, PasswordResetToken.used_at.is_(None))
+        .values(used_at=_now())
+    )
+    if claimed.rowcount == 0:
+        db.rollback()
+        raise bad_link
+
+    user.password_hash = password_hash
+    user.token_version = User.token_version + 1  # ends every session from before the reset
+    # The link went to the mailbox, which proves ownership as well as the code would
+    user.email_verified_at = user.email_verified_at or _now()
+    user.failed_logins = 0
+    user.locked_until = None
+    db.execute(delete(EmailOtp).where(EmailOtp.user_id == user.id))
+    db.commit()
+    return MessageOut(message="Your password has been reset. You can sign in now.")
 
 
 @router.get("/me", response_model=UserOut)

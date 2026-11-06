@@ -7,13 +7,15 @@ from sqlalchemy import select
 
 from app.api import auth as auth_api
 from app.core import ratelimit
+from app.core.config import settings
 from app.core.security import verify_password
-from app.models import EmailOtp, User
+from app.models import EmailOtp, PasswordResetToken, User
 
 EMAIL = "alice@example.com"
 PASSWORD = "password123"
 REGISTER = {"name": "Alice", "email": EMAIL, "password": PASSWORD, "confirm_password": PASSWORD}
 LOGIN = {"email": EMAIL, "password": PASSWORD}
+NEW_PASSWORD = "brand-new-pass9"
 
 
 def register(client):
@@ -28,6 +30,15 @@ def verify(client, code, email=EMAIL):
 
 def resend(client, email=EMAIL):
     return client.post("/auth/resend-code", json={"email": email})
+
+
+def forgot(client, email=EMAIL):
+    return client.post("/auth/forgot-password", json={"email": email})
+
+
+def reset(client, token, password=NEW_PASSWORD, confirm=None):
+    body = {"token": token, "password": password, "confirm_password": confirm or password}
+    return client.post("/auth/reset-password", json=body)
 
 
 def wrong_code(code: str) -> str:
@@ -49,6 +60,15 @@ def otp_row(db_session_factory):
             return db.scalar(select(EmailOtp))
 
     return _get
+
+
+@pytest.fixture
+def verified(client, outbox):
+    """A verified account, logged in; returns its auth headers."""
+    register(client)
+    verify(client, outbox.code_for(EMAIL))
+    token = client.post("/auth/login", json=LOGIN).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ---------- Email verification ----------
@@ -260,3 +280,144 @@ def test_code_email_states_the_expiry(client, outbox):
     register(client)
 
     assert f"{auth_api.OTP_EXPIRE_MINUTES} minutes" in outbox.last_to(EMAIL).text
+
+
+# ---------- Forgot and reset password ----------
+
+
+def test_forgot_password_answers_the_same_for_known_and_unknown_emails(client, outbox, verified):
+    sent_before = len(outbox)
+
+    known = forgot(client)
+    unknown = forgot(client, "nobody@example.com")
+
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == {"message": "If this email exists, we sent a link"}
+    assert [to for to, _ in outbox[sent_before:]] == [EMAIL]
+
+
+def test_reset_link_uses_the_configured_site_not_the_host_header(client, outbox, verified, monkeypatch):
+    monkeypatch.setattr(settings, "frontend_url", "https://app.example.com/")
+
+    client.post("/auth/forgot-password", json={"email": EMAIL}, headers={"Host": "evil.example"})
+
+    token = outbox.reset_token_for(EMAIL)
+    assert f"https://app.example.com/reset-password?token={token}" in outbox.last_to(EMAIL).text
+    assert "evil.example" not in outbox.last_to(EMAIL).html
+
+
+def test_only_a_hash_of_the_reset_token_is_stored(client, outbox, verified, db_session_factory):
+    forgot(client)
+
+    with db_session_factory() as db:
+        stored = db.scalar(select(PasswordResetToken))
+    assert stored.token_hash != outbox.reset_token_for(EMAIL)
+    assert outbox.reset_token_for(EMAIL) not in stored.token_hash
+
+
+def test_reset_changes_the_password(client, outbox, verified):
+    forgot(client)
+
+    assert reset(client, outbox.reset_token_for(EMAIL)).status_code == 200
+
+    assert client.post("/auth/login", json=LOGIN).status_code == 401
+    assert client.post("/auth/login", json={**LOGIN, "password": NEW_PASSWORD}).status_code == 200
+
+
+def test_reset_token_works_only_once(client, outbox, verified):
+    forgot(client)
+    token = outbox.reset_token_for(EMAIL)
+    reset(client, token)
+
+    again = reset(client, token, "another-pass8")
+
+    assert again.status_code == 400
+    assert client.post("/auth/login", json={**LOGIN, "password": "another-pass8"}).status_code == 401
+
+
+def test_reset_token_expires_after_thirty_minutes(client, outbox, verified, db_session_factory):
+    before = datetime.now(UTC)
+    forgot(client)
+    with db_session_factory() as db:
+        row = db.scalar(select(PasswordResetToken))
+        lifetime = row.expires_at.replace(tzinfo=UTC) - before
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+
+    assert timedelta(minutes=29, seconds=59) < lifetime < timedelta(minutes=30, seconds=5)
+    assert reset(client, outbox.reset_token_for(EMAIL)).status_code == 400
+
+
+def test_unknown_reset_token_is_refused(client):
+    assert reset(client, "made-up-token").status_code == 400
+
+
+def test_a_new_request_cancels_the_older_link(client, outbox, verified):
+    forgot(client)
+    first = outbox.reset_token_for(EMAIL)
+    forgot(client)
+    second = outbox.reset_token_for(EMAIL)
+
+    assert first != second
+    assert reset(client, first).status_code == 400
+    assert reset(client, second).status_code == 200
+
+
+def test_reset_ends_old_sessions(client, outbox, verified):
+    assert client.get("/auth/me", headers=verified).status_code == 200
+    forgot(client)
+
+    reset(client, outbox.reset_token_for(EMAIL))
+
+    assert client.get("/auth/me", headers=verified).status_code == 401
+
+
+def test_session_after_the_reset_works(client, outbox, verified):
+    forgot(client)
+    reset(client, outbox.reset_token_for(EMAIL))
+    token = client.post("/auth/login", json={**LOGIN, "password": NEW_PASSWORD}).json()["access_token"]
+
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_reset_verifies_an_unverified_account_and_drops_its_code(client, outbox, otp_row):
+    register(client)  # a squatter's password, on a mailbox they cannot read
+    forgot(client)
+
+    reset(client, outbox.reset_token_for(EMAIL))
+
+    assert otp_row() is None
+    assert client.post("/auth/login", json=LOGIN).status_code == 401
+    assert client.post("/auth/login", json={**LOGIN, "password": NEW_PASSWORD}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "password, confirm, field, message",
+    [
+        ("short1", None, "password", "Password must be at least 8 characters."),
+        ("onlyletters", None, "password", "Password must contain a number."),
+        ("12345678", None, "password", "Password must contain a letter."),
+        (NEW_PASSWORD, "different9", "confirm_password", "Passwords do not match."),
+    ],
+)
+def test_reset_applies_the_password_rules(client, outbox, verified, password, confirm, field, message):
+    forgot(client)
+
+    res = reset(client, outbox.reset_token_for(EMAIL), password, confirm)
+
+    assert res.status_code == 422
+    assert [(e["loc"][-1], e["msg"]) for e in res.json()["detail"]] == [(field, message)]
+
+
+def test_reset_refuses_a_password_equal_to_the_email(client, outbox):
+    email = "user1@example.com"
+    client.post("/auth/register", json={**REGISTER, "email": email})
+    forgot(client, email)
+    token = outbox.reset_token_for(email)
+
+    res = reset(client, token, "USER1@example.com")
+
+    assert res.status_code == 422
+    assert res.json()["detail"][0]["loc"] == ["body", "password"]
+    assert res.json()["detail"][0]["msg"] == "Password must not be the same as your email."
+    assert reset(client, token).status_code == 200  # a refused password does not use up the link
