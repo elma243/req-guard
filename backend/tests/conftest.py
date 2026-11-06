@@ -6,6 +6,7 @@ import os
 os.environ["JWT_SECRET"] = "test-secret-not-for-production-0123456789"
 # Empty DATABASE_URL = SQLite, so tests never reach the real database configured in backend/.env
 os.environ["DATABASE_URL"] = ""
+os.environ["PROXY_SHARED_SECRET"] = ""
 
 import itertools  # noqa: E402
 import json  # noqa: E402
@@ -22,6 +23,8 @@ from app.core.db import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ai import llm  # noqa: E402
 from app.connectors import http as connector_http  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.core.ratelimit import limiter  # noqa: E402
 
 API_FIXTURES = Path(__file__).parent / "fixtures" / "api"
 
@@ -36,6 +39,13 @@ def no_retry_wait(monkeypatch):
     """Rate-limit retries in connectors and the LLM client do not really sleep in tests."""
     monkeypatch.setattr(connector_http, "sleep", lambda seconds: None)
     monkeypatch.setattr(llm, "sleep", lambda seconds: None)
+
+
+@pytest.fixture(autouse=True)
+def no_auth_rate_limit(monkeypatch):
+    """Tests share one client address; rate limit tests set the real limit themselves."""
+    limiter.reset()
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10_000)
 
 
 @pytest.fixture
