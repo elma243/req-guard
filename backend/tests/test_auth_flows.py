@@ -421,3 +421,175 @@ def test_reset_refuses_a_password_equal_to_the_email(client, outbox):
     assert res.json()["detail"][0]["loc"] == ["body", "password"]
     assert res.json()["detail"][0]["msg"] == "Password must not be the same as your email."
     assert reset(client, token).status_code == 200  # a refused password does not use up the link
+
+
+# ---------- Lockout ----------
+
+
+def fail_login(client, times, email=EMAIL):
+    return [client.post("/auth/login", json={"email": email, "password": "wrong-pass1"}) for _ in range(times)]
+
+
+def test_ten_failed_logins_lock_the_account_for_fifteen_minutes(client, verified, db_session_factory):
+    responses = fail_login(client, 10)
+
+    assert [r.status_code for r in responses] == [401] * 9 + [423]
+    assert all(r.json()["detail"] == "Email or password is incorrect" for r in responses[:9])
+    assert "temporarily locked" in responses[9].json()["detail"]
+    with db_session_factory() as db:
+        remaining = db.scalar(select(User)).locked_until.replace(tzinfo=UTC) - datetime.now(UTC)
+    assert timedelta(minutes=14, seconds=55) < remaining <= timedelta(minutes=15)
+
+
+def test_locked_account_refuses_the_right_password(client, verified):
+    fail_login(client, 10)
+
+    res = client.post("/auth/login", json=LOGIN)
+
+    assert res.status_code == 423
+    assert "15 minutes" in res.json()["detail"]
+
+
+def test_lock_ends_after_its_time(client, verified, db_session_factory):
+    fail_login(client, 10)
+    with db_session_factory() as db:
+        db.scalar(select(User)).locked_until = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+
+    assert client.post("/auth/login", json=LOGIN).status_code == 200
+    with db_session_factory() as db:
+        assert db.scalar(select(User)).locked_until is None
+
+
+def test_failures_start_from_zero_after_a_lock(client, verified, db_session_factory):
+    fail_login(client, 10)
+    with db_session_factory() as db:
+        db.scalar(select(User)).locked_until = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+
+    assert fail_login(client, 1)[0].status_code == 401
+
+
+def test_successful_login_clears_the_failure_count(client, verified, db_session_factory):
+    fail_login(client, 9)
+    client.post("/auth/login", json=LOGIN)
+
+    assert fail_login(client, 9)[-1].status_code == 401
+    with db_session_factory() as db:
+        assert db.scalar(select(User)).locked_until is None
+
+
+def test_password_reset_unlocks_the_account(client, outbox, verified):
+    fail_login(client, 10)
+    forgot(client)
+
+    reset(client, outbox.reset_token_for(EMAIL))
+
+    assert client.post("/auth/login", json={**LOGIN, "password": NEW_PASSWORD}).status_code == 200
+
+
+def test_unknown_email_is_never_locked(client):
+    assert {r.status_code for r in fail_login(client, 12, "nobody@example.com")} == {401}
+
+
+def test_unknown_email_still_spends_a_password_check(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(auth_api, "verify_dummy_password", calls.append)
+
+    fail_login(client, 1, "nobody@example.com")
+
+    assert calls == ["wrong-pass1"]
+
+
+# ---------- Rate limits on the endpoints ----------
+
+
+@pytest.fixture
+def five_per_minute(monkeypatch):
+    monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 5)
+
+
+def test_login_is_limited_per_email(client, five_per_minute):
+    responses = fail_login(client, 6)
+
+    assert [r.status_code for r in responses] == [401] * 5 + [429]
+    assert int(responses[5].headers["Retry-After"]) > 0
+    assert "Try again in" in responses[5].json()["detail"]
+
+
+def test_login_is_limited_per_ip(client, five_per_minute):
+    responses = [fail_login(client, 1, f"user{n}@example.com")[0] for n in range(6)]
+
+    assert [r.status_code for r in responses] == [401] * 5 + [429]
+
+
+def test_limit_lifts_after_a_minute(client, five_per_minute, clock):
+    fail_login(client, 5)
+    assert fail_login(client, 1)[0].status_code == 429
+
+    clock[0] += 60
+
+    assert fail_login(client, 1)[0].status_code == 401
+
+
+def test_limited_attempts_do_not_count_towards_lockout(client, verified, five_per_minute, db_session_factory):
+    ratelimit.limiter.reset()  # forget the fixture's own login
+
+    fail_login(client, 8)
+
+    with db_session_factory() as db:
+        assert db.scalar(select(User)).failed_logins == 5
+
+
+def test_register_is_limited(client, five_per_minute):
+    statuses = [
+        client.post("/auth/register", json={**REGISTER, "email": f"user{n}@example.com"}).status_code
+        for n in range(6)
+    ]
+
+    assert statuses == [201] * 5 + [429]
+
+
+def test_verify_is_limited_before_the_code_is_checked(client, outbox, five_per_minute):
+    register(client)
+    code = outbox.code_for(EMAIL)
+    for _ in range(4):
+        verify(client, wrong_code(code))
+    verify(client, wrong_code(code))
+
+    assert verify(client, code).status_code == 429
+
+
+def test_forgot_password_is_limited_alike_for_known_and_unknown_emails(client, verified, five_per_minute, clock):
+    known =[forgot(client).status_code for _ in range(6)]
+    clock[0] += 60
+    unknown = [forgot(client, "nobody@example.com").status_code for _ in range(6)]
+
+    assert known == unknown == [200] * 5 + [429]
+
+
+def test_spoofed_client_ip_gets_no_fresh_budget(client, five_per_minute):
+    statuses = [
+        client.post(
+            "/auth/login",
+            json={"email": f"user{n}@example.com", "password": "wrong-pass1"},
+            headers={"X-Client-IP": f"203.0.113.{n}"},
+        ).status_code
+        for n in range(6)
+    ]
+
+    assert statuses == [401] * 5 + [429]
+
+
+def test_each_browser_has_its_own_budget_behind_the_proxy(client, five_per_minute, monkeypatch):
+    monkeypatch.setattr(settings, "proxy_shared_secret", "shared-secret")
+    statuses = [
+        client.post(
+            "/auth/login",
+            json={"email": f"user{n}@example.com", "password": "wrong-pass1"},
+            headers={"X-Client-IP": f"203.0.113.{n}", "X-Proxy-Secret": "shared-secret"},
+        ).status_code
+        for n in range(6)
+    ]
+
+    assert statuses == [401] * 6

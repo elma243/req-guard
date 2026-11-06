@@ -1,6 +1,7 @@
 """Register, verify the email, log in, reset a forgotten password and read the current user."""
 
 import hmac
+import math
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
@@ -40,6 +41,8 @@ OTP_EXPIRE_MINUTES = 10
 OTP_MAX_ATTEMPTS = 5
 RESEND_COOLDOWN_SECONDS = 60
 RESET_EXPIRE_MINUTES = 30
+MAX_FAILED_LOGINS = 10
+LOCK_MINUTES = 15
 
 EMAIL_TAKEN = "An account with this email already exists. Sign in or reset your password."
 BAD_LOGIN = "Email or password is incorrect"
@@ -69,6 +72,28 @@ def _reset_hash(token: str) -> str:
 
 def _resend_key(email: str) -> str:
     return f"otp-cooldown:{email}"
+
+
+def _locked(until: datetime) -> HTTPException:
+    minutes = math.ceil((until - _now()).total_seconds() / 60)
+    return HTTPException(
+        status.HTTP_423_LOCKED,
+        detail=f"This account is temporarily locked. Try again in {minutes} minutes or reset your password.",
+    )
+
+
+def _record_failed_login(db: DbSession, user: User) -> datetime | None:
+    """Count a wrong password. Returns the end of the lock when this failure locks the account."""
+    # One statement, so failures at the same moment all count
+    db.execute(update(User).where(User.id == user.id).values(failed_logins=User.failed_logins + 1))
+    db.commit()
+    db.refresh(user)
+    if user.failed_logins < MAX_FAILED_LOGINS:
+        return None
+    user.failed_logins = 0
+    user.locked_until = _now() + timedelta(minutes=LOCK_MINUTES)
+    db.commit()
+    return user.locked_until
 
 
 def _issue_otp(db: DbSession, user: User, background: BackgroundTasks) -> None:
@@ -151,8 +176,16 @@ def login(body: LoginIn, request: Request, db: DbSession) -> TokenOut:
     if user is None:
         verify_dummy_password(body.password)  # takes as long as checking a real account
         raise bad_login
+    # Checked first: while locked, an attacker learns nothing about the password they try
+    if user.locked_until is not None and as_utc(user.locked_until) > _now():
+        raise _locked(as_utc(user.locked_until))
     if not verify_password(body.password, user.password_hash):
-        raise bad_login
+        locked_until = _record_failed_login(db, user)
+        raise _locked(locked_until) if locked_until else bad_login
+    if user.failed_logins or user.locked_until:
+        user.failed_logins = 0
+        user.locked_until = None
+        db.commit()
     # Only after the right password, so this cannot be used to discover accounts
     if user.email_verified_at is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=NOT_VERIFIED)
@@ -195,7 +228,7 @@ def reset_password(body: ResetPasswordIn, request: Request, db: DbSession) -> Me
     if body.password.strip().lower() == user.email:
         # Same shape as a validation error; the schema cannot check this, it does not know the email
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=[{"type": "invalid", "loc": ["body", "password"], "msg": PASSWORD_EQUALS_EMAIL}],
         )
     password_hash = hash_password(body.password)
