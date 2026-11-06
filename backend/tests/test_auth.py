@@ -49,8 +49,10 @@ def test_register_rejects_short_password_bad_email_and_blank_name(client):
     assert client.post("/auth/register", json={**REGISTER, "name": "   "}).status_code == 422
 
 
-def test_login_returns_token(client):
+def test_login_returns_token(client, outbox):
     client.post("/auth/register", json=REGISTER)
+    code = outbox.code_for("alice@example.com")
+    client.post("/auth/verify-email", json={"email": "alice@example.com", "code": code})
 
     res = client.post("/auth/login", json={"email": "alice@example.com", "password": "password123"})
 
@@ -68,7 +70,7 @@ def test_login_wrong_password_and_unknown_email_give_same_401(client):
     unknown = client.post("/auth/login", json={"email": "bob@example.com", "password": "password123"})
 
     assert wrong_pw.status_code == unknown.status_code == 401
-    assert wrong_pw.json()["detail"] == unknown.json()["detail"]
+    assert wrong_pw.json()["detail"] == unknown.json()["detail"] == "Email or password is incorrect"
 
 
 def test_me_with_token(client, make_user):

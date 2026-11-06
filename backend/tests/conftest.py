@@ -104,8 +104,8 @@ _counter = itertools.count(1)
 
 
 @pytest.fixture
-def make_user(client):
-    """Register and log in a new user; returns (user_json, auth_headers)."""
+def make_user(client, outbox):
+    """Register, verify and log in a new user; returns (user_json, auth_headers)."""
 
     def _make(name: str | None = None, password: str = "password123"):
         n = next(_counter)
@@ -113,7 +113,9 @@ def make_user(client):
         body = {"name": name or f"User {n}", "email": email, "password": password, "confirm_password": password}
         res = client.post("/auth/register", json=body)
         assert res.status_code == 201, res.text
-        token = client.post("/auth/login", json={"email": email, "password": password}).json()["access_token"]
+        code = outbox.code_for(email)
+        assert client.post("/auth/verify-email", json={"email": email, "code": code}).status_code == 200
+        token =client.post("/auth/login", json={"email": email, "password": password}).json()["access_token"]
         return res.json(), {"Authorization": f"Bearer {token}"}
 
     return _make
