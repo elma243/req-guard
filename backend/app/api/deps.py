@@ -28,11 +28,12 @@ def get_current_user(
     if credentials is None:
         raise unauthorized
     try:
-        user_id = decode_access_token(credentials.credentials)
+        user_id, token_version = decode_access_token(credentials.credentials)
     except InvalidTokenError:
         raise unauthorized from None
     user = db.get(User, user_id)
-    if user is None:
+    # An older version means the password was reset after this token was issued
+    if user is None or user.token_version != token_version:
         raise unauthorized
     return user
 

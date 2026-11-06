@@ -1,6 +1,9 @@
+import hashlib
+
 import jwt
 from sqlalchemy import select
 
+from app.core import security
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.models import User
@@ -84,7 +87,7 @@ def test_me_with_garbage_token_is_401(client):
 def test_me_with_expired_token_is_401(client, make_user, monkeypatch):
     user, _ = make_user()
     monkeypatch.setattr(settings, "jwt_expire_minutes", -1)
-    token = create_access_token(user["id"])
+    token = create_access_token(user["id"], 0)
 
     res = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
 
@@ -98,6 +101,36 @@ def test_me_with_token_signed_by_other_secret_is_401(client, make_user):
     res = client.get("/auth/me", headers={"Authorization": f"Bearer {forged}"})
 
     assert res.status_code == 401
+
+
+def test_token_with_an_old_version_is_401(client, make_user, db_session_factory):
+    user, headers = make_user()
+    with db_session_factory() as db:
+        db.get(User, user["id"]).token_version += 1
+        db.commit()
+
+    assert client.get("/auth/me", headers=headers).status_code == 401
+
+
+def test_token_without_a_version_is_401(client, make_user):
+    user, _ = make_user()
+    old = jwt.encode({"sub": str(user["id"]), "exp": 9999999999}, settings.jwt_secret, algorithm="HS256")
+
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {old}"}).status_code == 401
+
+
+def test_otp_is_six_digits_and_keeps_leading_zeros(monkeypatch):
+    monkeypatch.setattr(security.secrets, "randbelow", lambda _: 42)
+
+    assert security.generate_otp() == "000042"
+
+
+def test_secret_hash_is_keyed(monkeypatch):
+    first = security.hash_secret("otp:1:123456")
+    monkeypatch.setattr(settings, "jwt_secret", "another-secret-of-a-reasonable-length-987")
+
+    assert security.hash_secret("otp:1:123456") != first
+    assert first != hashlib.sha256(b"otp:1:123456").hexdigest()
 
 
 def test_token_of_deleted_user_is_401(client, make_user, db_session_factory):

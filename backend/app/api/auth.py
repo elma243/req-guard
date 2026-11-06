@@ -30,7 +30,7 @@ def login(body: LoginIn, db: DbSession) -> TokenOut:
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     return TokenOut(
-        access_token=create_access_token(user.id),
+        access_token=create_access_token(user.id, user.token_version),
         expires_in=settings.jwt_expire_minutes * 60,
     )
 
