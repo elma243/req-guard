@@ -56,7 +56,7 @@ export default function ResetPasswordForm({ token }: { token: string }) {
   return (
     <AuthShell>
       <h2 className="text-2xl font-semibold tracking-tight">Choose a new password</h2>
-      <p className="mt-1.5 text-sm text-zinc-400">Signing in afterwards ends all your older sessions.</p>
+      <p className="mt-1.5 text-sm text-zinc-400">This also signs you out everywhere else.</p>
 
       <form onSubmit={handleSubmit} noValidate className="mt-8 space-y-5">
         <div>

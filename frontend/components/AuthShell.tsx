@@ -132,7 +132,7 @@ export function SuccessPanel({ title, children }: { title: string; children: Rea
   return (
     <div role="status">
       <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-300">
-        <CheckIcon />
+        <CheckIcon size={22} />
       </span>
       <h2 className="mt-5 text-2xl font-semibold tracking-tight">{title}</h2>
       <div className="mt-2 text-sm text-zinc-400">{children}</div>
@@ -188,9 +188,9 @@ export function ShieldIcon({ size = 24 }: { size?: number }) {
   );
 }
 
-function CheckIcon() {
+function CheckIcon({ size = 12 }: { size?: number }) {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="m5 12 5 5 9-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );

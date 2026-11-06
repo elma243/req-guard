@@ -93,7 +93,7 @@ export default function VerifyEmailForm({ initialEmail, justSent }: { initialEma
       <p className="mt-1.5 text-sm text-zinc-400">
         {initialEmail ? (
           <>
-            Enter the 6-digit code we sent to <span className="break-all text-zinc-200">{initialEmail}</span>. It expires
+            Enter the 6-digit code we sent to <span className="wrap-break-word text-zinc-200">{initialEmail}</span>. It expires
             in 10 minutes.
           </>
         ) : (
