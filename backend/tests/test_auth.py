@@ -8,7 +8,12 @@ from app.core.config import settings
 from app.core.security import create_access_token
 from app.models import User
 
-REGISTER = {"name": "Alice", "email": "Alice@Example.com", "password": "password123"}
+REGISTER = {
+    "name": "Alice",
+    "email": "Alice@Example.com",
+    "password": "password123",
+    "confirm_password": "password123",
+}
 
 
 def test_register_returns_user_without_password(client):
