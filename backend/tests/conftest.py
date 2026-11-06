@@ -7,9 +7,12 @@ os.environ["JWT_SECRET"] = "test-secret-not-for-production-0123456789"
 # Empty DATABASE_URL = SQLite, so tests never reach the real database configured in backend/.env
 os.environ["DATABASE_URL"] = ""
 os.environ["PROXY_SHARED_SECRET"] = ""
+# backend/.env holds real SMTP settings; tests must never send a real email
+os.environ["SMTP_HOST"] = ""
 
 import itertools  # noqa: E402
 import json  # noqa: E402
+import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
@@ -23,6 +26,7 @@ from app.core.db import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ai import llm  # noqa: E402
 from app.connectors import http as connector_http  # noqa: E402
+from app.core import email as mailer  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.ratelimit import limiter  # noqa: E402
 
@@ -46,6 +50,27 @@ def no_auth_rate_limit(monkeypatch):
     """Tests share one client address; rate limit tests set the real limit themselves."""
     limiter.reset()
     monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10_000)
+
+
+class Outbox(list):
+    """Emails the app would have sent, as (to, Email) pairs."""
+
+    def last_to(self, email: str):
+        return [message for to, message in self if to == email][-1]
+
+    def code_for(self, email: str) -> str:
+        return re.search(r"\b\d{6}\b", self.last_to(email).text).group()
+
+    def reset_token_for(self, email: str) -> str:
+        return re.search(r"reset-password\?token=(\S+)", self.last_to(email).text).group(1)
+
+
+@pytest.fixture(autouse=True)
+def outbox(monkeypatch):
+    """Captures every email instead of sending it."""
+    sent = Outbox()
+    monkeypatch.setattr(mailer, "deliver", lambda to, email: sent.append((to, email)))
+    return sent
 
 
 @pytest.fixture
@@ -85,7 +110,8 @@ def make_user(client):
     def _make(name: str | None = None, password: str = "password123"):
         n = next(_counter)
         email = f"user{n}@example.com"
-        res = client.post("/auth/register", json={"name": name or f"User {n}", "email": email, "password": password})
+        body = {"name": name or f"User {n}", "email": email, "password": password, "confirm_password": password}
+        res = client.post("/auth/register", json=body)
         assert res.status_code == 201, res.text
         token = client.post("/auth/login", json={"email": email, "password": password}).json()["access_token"]
         return res.json(), {"Authorization": f"Bearer {token}"}

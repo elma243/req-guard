@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # Shared with the Next.js server, which proves with it that its X-Client-IP header can be believed
     proxy_shared_secret: str = ""
 
+    # Email. Without SMTP_HOST emails are printed to the backend console (dev mode)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    email_from: str = ""
+
     # Comma-separated list of frontend URLs allowed to call the API
     cors_origins: str = "http://localhost:3000"
     # Frontend base URL, used to send the browser back after the Gmail OAuth flow
