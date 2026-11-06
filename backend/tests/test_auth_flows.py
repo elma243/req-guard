@@ -450,6 +450,14 @@ def test_locked_account_refuses_the_right_password(client, verified):
     assert "15 minutes" in res.json()["detail"]
 
 
+def test_last_minute_of_a_lock_reads_correctly(client, verified, db_session_factory):
+    with db_session_factory() as db:
+        db.scalar(select(User)).locked_until = datetime.now(UTC) + timedelta(seconds=30)
+        db.commit()
+
+    assert "Try again in 1 minute or" in client.post("/auth/login", json=LOGIN).json()["detail"]
+
+
 def test_lock_ends_after_its_time(client, verified, db_session_factory):
     fail_login(client, 10)
     with db_session_factory() as db:

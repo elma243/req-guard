@@ -76,9 +76,10 @@ def _resend_key(email: str) -> str:
 
 def _locked(until: datetime) -> HTTPException:
     minutes = math.ceil((until - _now()).total_seconds() / 60)
+    wait = f"{minutes} minute{'' if minutes == 1 else 's'}"
     return HTTPException(
         status.HTTP_423_LOCKED,
-        detail=f"This account is temporarily locked. Try again in {minutes} minutes or reset your password.",
+        detail=f"This account is temporarily locked. Try again in {wait} or reset your password.",
     )
 
 

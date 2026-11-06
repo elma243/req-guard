@@ -83,6 +83,16 @@ def test_enforce_answers_429_with_retry_after(clock):
     assert caught.value.detail == "Too many tries. Try again in 60 seconds."
 
 
+def test_last_second_reads_correctly(clock):
+    enforce("key", 1, 60)
+    clock[0] += 59.5
+
+    with pytest.raises(HTTPException) as caught:
+        enforce("key", 1, 60)
+
+    assert caught.value.detail == "Too many attempts. Try again in 1 second."
+
+
 def test_client_ip_is_the_socket_address_without_a_proxy():
     assert client_ip(make_request()) == "10.0.0.9"
 

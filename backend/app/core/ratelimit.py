@@ -57,7 +57,7 @@ def enforce(key: str, limit: int, window: float, message: str = "Too many attemp
     if wait:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"{message} Try again in {wait} seconds.",
+            detail=f"{message} Try again in {wait} second{'' if wait == 1 else 's'}.",
             headers={"Retry-After": str(wait)},
         )
 
