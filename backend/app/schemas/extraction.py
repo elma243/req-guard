@@ -46,3 +46,6 @@ class ExtractResult(BaseModel):
     notice: str | None = None
     # Why the AI was not used for those batches (no key, no message text)
     ai_error: str | None = None
+    # Why the duplicate / conflict / change request checks could not run on the new requirements; None when
+    # they ran
+    similarity_unavailable_reason: str | None = None

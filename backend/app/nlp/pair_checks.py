@@ -12,6 +12,7 @@ cautious (rule 7). Like the rule-based checks, only findings still origin "ai" a
 updated or removed (rule 2).
 """
 
+import logging
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -25,6 +26,8 @@ from app.models import Project, Requirement, ValidationFinding
 from app.models.validation import PAIR_CATEGORIES
 from app.nlp import nli, similarity
 from app.nlp.similarity import ModelUnavailable
+
+logger = logging.getLogger(__name__)
 
 # Cosine similarity from which two requirements may say the same thing
 DUPLICATE = 0.85
@@ -168,16 +171,20 @@ def check_similarity(db: Session, project: Project, changed_ids: Iterable[int] |
     except ModelUnavailable as exc:
         return str(exc)
 
-    vectors = similarity.ensure_embeddings(db, embedder, [r.current for r in candidates])
-    scores = similarity.similarity_matrix([vectors[r.current.id] for r in candidates])
-    pairs = []
-    for i, j in np.argwhere(np.triu(scores >= CONFLICT_CANDIDATE, k=1)):
-        old, new = candidates[int(i)], candidates[int(j)]
-        if changed is None or old.id in changed or new.id in changed:
-            pairs.append((old, new, float(scores[i, j])))
-    contradictions = nli.contradiction_both_ways(
-        nli_model, [(old.current.statement, new.current.statement) for old, new, _ in pairs]
-    )
+    try:  # a model failing while it runs must not break the edit or review that asked for the check
+        vectors = similarity.ensure_embeddings(db, embedder, [r.current for r in candidates])
+        scores = similarity.similarity_matrix([vectors[r.current.id] for r in candidates])
+        pairs = []
+        for i, j in np.argwhere(np.triu(scores >= CONFLICT_CANDIDATE, k=1)):
+            old, new = candidates[int(i)], candidates[int(j)]
+            if changed is None or old.id in changed or new.id in changed:
+                pairs.append((old, new, float(scores[i, j])))
+        contradictions = nli.contradiction_both_ways(
+            nli_model, [(old.current.statement, new.current.statement) for old, new, _ in pairs]
+        )
+    except Exception as exc:
+        logger.exception("Similarity checks failed")
+        return f"The similarity checks failed: {exc}"[:500]
     wanted: dict[tuple[int, str, int], PairDraft] = {}
     for (old, new, s), c in zip(pairs, contradictions, strict=True):
         found = classify_pair(_item(old), _item(new), s, c)

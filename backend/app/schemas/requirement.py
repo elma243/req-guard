@@ -57,6 +57,11 @@ class FailedCriterion(BaseModel):
     reason: str
 
 
+FindingCategory = Literal[
+    "vague", "missing_info", "out_of_scope", "module_alignment", "duplicate", "conflict", "change_request"
+]
+
+
 class ValidationFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,14 +69,26 @@ class ValidationFindingOut(BaseModel):
     requirement_id: int
     # The requirement version that was checked
     version: int
-    category: Literal["vague", "missing_info", "out_of_scope", "module_alignment"]
+    category: FindingCategory
     rule: str
     severity: Literal["low", "medium", "high"]
     reason: str
+    # For a pair finding: the other requirement's statement when it was checked
     evidence: str
+    # Pair findings (duplicate, conflict, change_request) only: the other, older requirement, its current
+    # statement, and the model's score (similarity, or contradiction probability for a conflict)
+    related_requirement_id: int | None = None
+    related_code: str | None = None
+    related_statement: str | None = None
+    score: float | None = None
     origin: Literal["ai", "user"]
     status: Literal["suggested", "accepted", "edited", "rejected"]
     created_at: UtcDatetime
+
+
+class RequirementRef(BaseModel):
+    id: int
+    code: str
 
 
 class RequirementOut(BaseModel):
@@ -94,6 +111,8 @@ class RequirementOut(BaseModel):
     module_score: float | None
     open_findings: int
     has_issues: bool
+    # The accepted requirement this one may change (an open change request finding); None otherwise
+    change_request_for: RequirementRef | None = None
 
 
 class RequirementDetail(RequirementOut):

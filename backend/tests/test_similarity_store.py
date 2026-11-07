@@ -231,3 +231,13 @@ def test_a_single_requirement_needs_no_model(db, project, similar):
     similar.unavailable = "should not be asked"
     add(db, project, A, 1)
     assert run(db, project) is None
+
+
+def test_a_model_failing_while_it_runs_gives_a_reason(db, project, similar, monkeypatch):
+    add(db, project, A, 1), add(db, project, B, 2)
+
+    def broken(pairs):
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(similar.nli, "contradiction", broken)
+    assert run(db, project) == "The similarity checks failed: out of memory"
