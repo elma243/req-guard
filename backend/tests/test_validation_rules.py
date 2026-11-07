@@ -161,26 +161,57 @@ def test_no_actor_is_not_checked_for_non_functional():
     assert check_missing_info(item) == []
 
 
-def nfr(statement: str) -> RequirementInput:
-    return RequirementInput(statement, type="non_functional", sources=["Source sentence."])
+def nfr(statement: str, category: str | None = None) -> RequirementInput:
+    return RequirementInput(statement, type="non_functional", nfr_category=category, sources=["Source sentence."])
 
 
 @pytest.mark.parametrize(
-    "statement",
+    "statement, category",
     [
-        "The system shall respond quickly.",
-        "The system shall use OAuth 2.",  # a version, not a value
-        "The system shall require a one-time password.",
-        "site ta nirapod hote hobe",
-        "সাইট নিরাপদ হতে হবে।",
+        ("The system shall respond quickly.", None),
+        ("The app shall feel smooth.", "performance"),  # performance and reliability are always measured
+        ("Data shall be kept safe.", "reliability"),
+        ("The system shall have high availability.", "other"),
+        ("The system shall handle many concurrent users.", "other"),  # capacity
+        ("Sessions shall time out when idle.", "security"),  # a security limit
+        ("The account shall lock after failed login attempts.", "security"),
+        ("App ta taratari load hobe", "usability"),  # speed, whatever the category
     ],
 )
-def test_no_measurable_value(statement):
-    drafts = check_missing_info(nfr(statement))
+def test_no_measurable_value(statement, category):
+    drafts = check_missing_info(nfr(statement, category))
 
     assert rules(drafts) == ["no_measurable_value"]
     assert drafts[0].severity == "high"
     assert drafts[0].evidence == "Source sentence."
+
+
+@pytest.mark.parametrize(
+    "statement, category",
+    [
+        ("The system shall support a dark mode theme.", "usability"),
+        ("The app shall be available in Bangla and English.", "usability"),
+        ("The system shall use OAuth 2.", "security"),  # a version, not a value
+        ("The system shall require a one-time password.", "security"),
+        ("site ta nirapod hote hobe", "security"),
+        ("সাইট নিরাপদ হতে হবে।", None),
+    ],
+)
+def test_yes_no_features_get_only_a_low_note(statement, category):
+    drafts = check_missing_info(nfr(statement, category))
+
+    assert rules(drafts) == ["add_acceptance_criteria"]
+    assert drafts[0].severity == "low"
+    assert "acceptance criteria" in drafts[0].reason
+
+
+def test_dark_mode_theme_passes_the_verifiable_criterion():
+    item = nfr("The system shall support a dark mode theme.", "usability")
+    drafts, _ = run_rules(item)
+    score, failed = score_quality(item, drafts)
+
+    assert "no_measurable_value" not in rules(drafts)
+    assert "verifiable" not in {f["criterion"] for f in failed}
 
 
 @pytest.mark.parametrize(

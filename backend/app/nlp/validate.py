@@ -30,6 +30,8 @@ from app.nlp.lexicon import (
     COMPARATORS,
     LIMIT_WORDS,
     LIMIT_WORDS_BANGLA,
+    MEASURED_TOPIC_WORDS,
+    MEASURED_TOPIC_WORDS_BANGLA,
     NUMBER_WORDS,
     STOP_WORDS,
     UNITS,
@@ -65,6 +67,7 @@ def _whole_words(terms: Iterable[str], word_starts: Iterable[str] = ()) -> re.Pa
 class RequirementInput:
     statement: str
     type: str = "functional"  # "functional" or "non_functional"
+    nfr_category: str | None = None  # performance, security, usability, reliability, other; None if functional
     actor: str = ""
     version_origin: str = "ai"  # who wrote the current version
     sources: Sequence[str] = ()  # the client's sentences, unchanged
@@ -131,6 +134,9 @@ def check_vague(item: RequirementInput) -> list[Draft]:
 
 _ACTOR = _whole_words(ACTOR_WORDS, ACTOR_WORDS_BANGLA)
 _LIMIT = _whole_words(LIMIT_WORDS, LIMIT_WORDS_BANGLA)
+_MEASURED_TOPIC = _whole_words(MEASURED_TOPIC_WORDS, MEASURED_TOPIC_WORDS_BANGLA)
+# Non-functional categories that are always measured
+MEASURED_CATEGORIES = ("performance", "reliability")
 
 _DIGITS = r"\d+(?:[.,]\d+)*"  # \d also matches Bengali digits
 _NUMBER = rf"(?:{_DIGITS}|{_alternatives(NUMBER_WORDS)})"
@@ -149,14 +155,28 @@ def has_measurable_value(text: str) -> bool:
     return _MEASURABLE.search(_normal(text)) is not None
 
 
+def is_measured_kind(item: RequirementInput) -> bool:
+    """A non-functional requirement that is naturally measured: performance or reliability, or one about
+    availability, capacity, speed or a limit (e.g. a security timeout). Others, such as "support a dark mode
+    theme", are yes / no features."""
+    if item.nfr_category in MEASURED_CATEGORIES:
+        return True
+    statement = _normal(item.statement)
+    return _MEASURED_TOPIC.search(statement) is not None or _LIMIT.search(statement) is not None
+
+
 def check_missing_info(item: RequirementInput) -> list[Draft]:
-    """No actor (functional), no measurable value (non-functional), or no value where a limit is expected."""
+    """No actor (functional), no measurable value (measured non-functional), or no value where a limit is
+    expected. A yes / no non-functional feature only gets a low note to add acceptance criteria."""
     statement = _normal(item.statement)
     if item.type == "non_functional":
         if has_measurable_value(statement):
             return []
-        reason = "No measurable value was found, so this may be hard to test."
-        return [Draft("missing_info", "no_measurable_value", "high", reason, item.evidence)]
+        if is_measured_kind(item):
+            reason = "No measurable value was found, so this may be hard to test."
+            return [Draft("missing_info", "no_measurable_value", "high", reason, item.evidence)]
+        reason = "This may be a yes / no feature. Consider adding acceptance criteria that say how to check it."
+        return [Draft("missing_info", "add_acceptance_criteria", "low", reason, item.evidence)]
 
     drafts: list[Draft] = []
     if not item.actor.strip() and _ACTOR.search(statement) is None:
@@ -323,6 +343,7 @@ def validate_requirement(requirement: Requirement, project: Project) -> None:
     item = RequirementInput(
         statement=current.statement,
         type=current.type,
+        nfr_category=current.nfr_category,
         actor=current.actor,
         version_origin=current.origin,
         sources=[s.source_sentence for s in requirement.sources],
