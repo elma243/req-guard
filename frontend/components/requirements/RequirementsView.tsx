@@ -22,6 +22,7 @@ import {
   bulkRequirements,
   getRequirement,
   listRequirements,
+  mergeRequirements,
   rejectRequirement,
   restoreRequirement,
   undoRequirement,
@@ -142,6 +143,12 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   function open(id: number) {
     setActiveId(id);
     setPanelOpen(true);
+  }
+
+  // Opened from a finding: the other requirement may be hidden by the filters, so they are cleared first
+  function openAnywhere(id: number) {
+    if (!visible.some((r) => r.id === id)) clearFilters();
+    open(id);
   }
 
   function retryDetail() {
@@ -270,6 +277,28 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
       show("error", `Could not undo: ${errorText(err)}`);
     } finally {
       markBusy(ids, false);
+    }
+  }
+
+  // From a possible-duplicate finding: fold `r` into `targetId`, then show the requirement that stays
+  async function mergeInto(r: Requirement, targetId: number) {
+    const target = data?.find((row) => row.id === targetId);
+    if (!target) return show("error", "That requirement is no longer in the list.");
+    if (target.status === "merged" || target.status === "rejected") {
+      return show("info", `${target.code} is ${target.status}. Restore it first.`);
+    }
+    if (busy.has(r.id)) return;
+    markBusy([r.id], true);
+    try {
+      const updated = await mergeRequirements(projectId, targetId, [r.id]);
+      applyDetail(updated);
+      refreshList();
+      openAnywhere(targetId);
+      show("info", `Merged ${r.code} into ${updated.code}. Restore ${r.code} to undo.`);
+    } catch (err) {
+      show("error", `${r.code}: ${errorText(err)}`);
+    } finally {
+      markBusy([r.id], false);
     }
   }
 
@@ -564,6 +593,9 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
           mergedHere={mergedHere}
           onRetry={retryDetail}
           onClose={() => setPanelOpen(false)}
+          busy={busy.has(active.id)}
+          onOpenRequirement={openAnywhere}
+          onMergeInto={(targetId) => void mergeInto(active, targetId)}
           actions={
             <PanelActions
               requirement={active}

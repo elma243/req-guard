@@ -17,6 +17,9 @@ export default function RequirementPanel({
   onRetry,
   onClose,
   actions,
+  busy = false,
+  onOpenRequirement,
+  onMergeInto,
 }: {
   requirement: Requirement;
   detail: DetailState;
@@ -26,6 +29,10 @@ export default function RequirementPanel({
   onRetry: () => void;
   onClose: () => void;
   actions?: React.ReactNode;
+  busy?: boolean;
+  onOpenRequirement?: (id: number) => void;
+  // Merge this requirement into another (from a possible-duplicate finding)
+  onMergeInto?: (id: number) => void;
 }) {
   const v = r.current;
   const mergedInto = r.merged_into_id ? codes.get(r.merged_into_id) : undefined;
@@ -82,7 +89,12 @@ export default function RequirementPanel({
           <div className="space-y-3">
             <QualitySummary requirement={r} />
             {detail?.data ? (
-              <FindingList detail={detail.data} />
+              <FindingList
+                detail={detail.data}
+                disabled={busy}
+                onOpen={onOpenRequirement}
+                onMergeInto={onMergeInto}
+              />
             ) : (
               <Loading detail={detail} what="findings" onRetry={onRetry} />
             )}

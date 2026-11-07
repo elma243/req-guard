@@ -368,6 +368,7 @@ export type Requirement = {
   module_score: number | null; // 0-1
   open_findings: number; // findings not rejected by a person
   has_issues: boolean; // open requirement with findings or failed criteria
+  change_request_for: { id: number; code: string } | null; // the accepted requirement this one may change
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
@@ -385,7 +386,16 @@ export type RequirementUpdate = {
 
 export type FailedCriterion = { criterion: string; points: number; reason: string };
 
-export type FindingCategory = "vague" | "missing_info" | "out_of_scope" | "module_alignment";
+export type FindingCategory =
+  | "vague"
+  | "missing_info"
+  | "out_of_scope"
+  | "module_alignment"
+  | "duplicate"
+  | "conflict"
+  | "change_request";
+// Findings about a pair of requirements: related_* is the other, older one
+export const PAIR_CATEGORIES: readonly FindingCategory[] = ["duplicate", "conflict", "change_request"];
 export type FindingSeverity = "low" | "medium" | "high";
 
 export type ValidationFinding = {
@@ -396,13 +406,24 @@ export type ValidationFinding = {
   rule: string;
   severity: FindingSeverity;
   reason: string;
-  evidence: string; // the matched word or the client's sentence
+  evidence: string; // the matched word or the client's sentence; for a pair, the other statement when checked
+  related_requirement_id: number | null; // pair findings only
+  related_code: string | null;
+  related_statement: string | null; // the other requirement's current statement
+  score: number | null; // similarity, or contradiction probability for a conflict (0-1)
   origin: "ai" | "user";
   status: "suggested" | "accepted" | "edited" | "rejected";
   created_at: string;
 };
 
-export type ValidateResult = { validated: number; with_issues: number; findings: number };
+export type ValidateResult = {
+  validated: number;
+  with_issues: number;
+  findings: number;
+  similarity_unavailable_reason: string | null; // why duplicate / conflict checks could not run
+};
+
+export const SIMILARITY_UNAVAILABLE = "Similarity checks unavailable";
 
 export const BULK_LIMIT = 200;
 export type BulkAction = "accept" | "reject" | "undo";
@@ -421,6 +442,7 @@ export type ExtractResult = {
   rule_based_batches: number; // batches done with cue-word rules because no AI model answered
   notice: string | null; // "AI unavailable — used rule-based extraction." when rules were used
   ai_error: string | null; // why the AI was not used
+  similarity_unavailable_reason: string | null; // why duplicate / conflict checks could not run
 };
 
 // ai_model of requirements found by the rule-based fallback (text = the client's sentence)
