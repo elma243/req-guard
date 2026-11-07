@@ -411,6 +411,9 @@ export type ValidationFinding = {
   related_code: string | null;
   related_statement: string | null; // the other requirement's current statement
   score: number | null; // similarity, or contradiction probability for a conflict (0-1)
+  // Pair findings: "confirmed" when the AI checked the pair and agreed, "unconfirmed" when no AI answered
+  confirmation: "confirmed" | "unconfirmed" | null;
+  explanation: string | null; // the AI's one-sentence reason
   origin: "ai" | "user";
   status: "suggested" | "accepted" | "edited" | "rejected";
   created_at: string;

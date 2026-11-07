@@ -90,10 +90,26 @@ export function FindingList({
       {findings.map((f) => (
         <li key={f.id} className="rounded-lg border border-white/10 p-3 text-sm">
           <p className="flex items-center justify-between gap-2 text-xs">
-            <span className="text-zinc-300">{CATEGORY_LABELS[f.category]}</span>
+            <span className="flex items-center gap-2 text-zinc-300">
+              {CATEGORY_LABELS[f.category]}
+              {f.confirmation === "unconfirmed" && (
+                <span
+                  title="No AI model could check this pair, so only the similarity models found it."
+                  className="rounded-full px-1.5 py-px text-[11px] text-zinc-400 ring-1 ring-white/15"
+                >
+                  Unconfirmed
+                </span>
+              )}
+            </span>
             <span className={`capitalize ${SEVERITY_STYLE[f.severity]}`}>{f.severity}</span>
           </p>
           <p className="mt-1 text-zinc-200">{f.reason}</p>
+          {f.explanation && (
+            <p className="mt-1 text-xs text-zinc-400">
+              <span className="text-zinc-500">AI check: </span>
+              {f.explanation}
+            </p>
+          )}
           {PAIR_CATEGORIES.includes(f.category) && f.related_requirement_id !== null ? (
             <PairFinding
               finding={f}
