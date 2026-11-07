@@ -84,6 +84,7 @@ class Requirement(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="ValidationFinding.id",
+        foreign_keys="ValidationFinding.requirement_id",
     )
 
     @property

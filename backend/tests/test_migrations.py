@@ -46,6 +46,14 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
         c["name"] for c in inspect(engine).get_columns("users")
     }
 
+    assert "requirement_embeddings" in inspect(engine).get_table_names()
+    assert {"related_requirement_id", "score"} <= {c["name"] for c in inspect(engine).get_columns("validation_findings")}
+    with engine.begin() as connection:  # the pair categories pass the recreated check constraint
+        category_check = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE name = 'validation_findings'")
+        ).scalar_one()
+    assert "change_request" in category_check
+
     # Deleting a project removes its sources and messages in the database itself
     def on_delete(table: str, referred: str) -> str | None:
         fks = inspect(engine).get_foreign_keys(table)
@@ -59,6 +67,13 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("requirement_sources", "messages") == "CASCADE"
     assert on_delete("validation_findings", "requirements") == "CASCADE"
     assert on_delete("email_otps", "users") == "CASCADE"
+    assert on_delete("requirement_embeddings", "requirement_versions") == "CASCADE"
+    related = [
+        fk
+        for fk in inspect(engine).get_foreign_keys("validation_findings")
+        if fk["constrained_columns"] == ["related_requirement_id"]
+    ]
+    assert [(fk["referred_table"], fk["options"].get("ondelete")) for fk in related] == [("requirements", "CASCADE")]
     assert on_delete("password_reset_tokens", "users") == "CASCADE"
     merged_from = [
         fk

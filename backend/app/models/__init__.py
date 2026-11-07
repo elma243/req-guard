@@ -1,6 +1,7 @@
 """SQLAlchemy models. Import every model module here so Alembic can find it."""
 
 from app.models.auth_token import EmailOtp, PasswordResetToken
+from app.models.embedding import RequirementEmbedding
 from app.models.message import Message
 from app.models.project import Project
 from app.models.requirement import Requirement, RequirementSource, RequirementVersion
@@ -15,6 +16,7 @@ __all__ = [
     "PasswordResetToken",
     "Project",
     "Requirement",
+    "RequirementEmbedding",
     "RequirementSource",
     "RequirementVersion",
     "Source",
