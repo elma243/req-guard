@@ -199,7 +199,11 @@ _BANGLA = "ঀ-৿"
 # next to Bengali vowel signs)
 _CUES = re.compile(
     r"\b(?:must|should|shall|needs?\s+to|required|lagbe|hobe|korte\s+parbe|chai|thakbe|jabe)\b"
-    rf"|(?<![{_BANGLA}])(?:লাগবে|হবে|করতে\s+পারবে|চাই|থাকবে|যাবে)(?![{_BANGLA}])",
+    # Something the client does NOT want is a requirement too ("lagbe na" and "chai na" already match above):
+    # it is how a conflict with an earlier request shows up
+    r"|\b(?:no\s+need|not\s+needed|not\s+required|(?:do|does)\s*n[o']t\s+(?:need|want)"
+    r"|(?:dorkar|proyojon)\s+(?:nai|nei|nay))\b"
+    rf"|(?<![{_BANGLA}])(?:লাগবে|হবে|করতে\s+পারবে|চাই|থাকবে|যাবে|(?:দরকার|প্রয়োজন)\s+(?:নেই|নাই))(?![{_BANGLA}])",
     re.IGNORECASE,
 )
 

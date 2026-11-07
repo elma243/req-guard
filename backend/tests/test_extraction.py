@@ -524,3 +524,36 @@ def test_force_rerun_after_validation_replaces_suggestions(db, project):
 
     assert again.requirements_created == 2
     assert [r.code for r in db.query(Requirement).order_by(Requirement.number)] == ["REQ-003", "REQ-004"]
+
+
+# ---------- what the client does NOT want ----------
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Dark mode lagbe na.",
+        "SMS notification chai na.",
+        "Dark mode er dorkar nai.",
+        "ডার্ক মোড দরকার নেই।",
+        "প্রিন্ট করার প্রয়োজন নেই।",
+        "We don't need a dark mode.",
+        "No need for SMS alerts.",
+    ],
+)
+def test_negative_requests_are_kept_by_the_rules(db, project, sentence):
+    """A "not needed" is a requirement: without it a conflict with an earlier request cannot be found."""
+    add_messages(db, project, sentence)
+
+    result = extract_requirements(db, project, None)
+
+    assert result.requirements_created == 1
+    (requirement,) = db.query(Requirement).all()
+    assert requirement.current.statement == sentence
+    assert requirement.sources[0].source_sentence == sentence
+
+
+def test_the_prompt_asks_for_negative_requirements():
+    prompt = load_prompt("extract_requirements")
+    assert "The system shall not" in prompt
+    assert all(word in prompt for word in ("lagbe na", "chai na", "দরকার নেই"))
