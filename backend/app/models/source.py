@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.db import Base
+from app.core.db import Base, JsonType
 
 SYNC_OK = "ok"
 SYNC_ERROR = "error"
@@ -26,7 +26,7 @@ class Source(Base):
     # Uploads: whatsapp | messenger | email | meeting_notes. APIs: jira | slack | gmail | telegram | discord
     type: Mapped[str] = mapped_column(String(30))
     display_name: Mapped[str] = mapped_column(String(200))
-    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    config: Mapped[dict] = mapped_column(JsonType, default=dict)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     credentials_encrypted: Mapped[str | None] = mapped_column(Text)
     # Result of the last API sync: ok | error | needs_auth (None for uploads and never-synced sources)

@@ -1,7 +1,6 @@
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     CheckConstraint,
     DateTime,
     Float,
@@ -14,7 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.db import Base
+from app.core.db import Base, JsonType
 
 ORIGINS = ("ai", "user")
 # "merged": folded into another requirement (merged_into_id); kept so nothing is lost
@@ -57,7 +56,7 @@ class Requirement(Base):
     # 0-100; None = not validated yet
     quality_score: Mapped[int | None] = mapped_column(Integer)
     # The criteria that failed: [{"criterion", "points", "reason"}]
-    quality_failed: Mapped[list[dict]] = mapped_column(JSON, default=list, server_default="[]")
+    quality_failed: Mapped[list[dict]] = mapped_column(JsonType, default=list, server_default="[]")
     # Best-matching module of the project and how well it matched (0-1); None when none matches
     module_name: Mapped[str | None] = mapped_column(String(100))
     module_score: Mapped[float | None] = mapped_column(Float)
