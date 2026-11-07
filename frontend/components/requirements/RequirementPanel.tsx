@@ -4,7 +4,16 @@ import { ErrorBanner, secondaryButton } from "@/components/ui";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
-import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
+import {
+  ChangeRequestBadge,
+  Confidence,
+  ModelBadge,
+  NFR_LABELS,
+  ReviewBadge,
+  SourceLine,
+  StatusBadge,
+  typeLabel,
+} from "./labels";
 
 // Loaded detail of the open requirement: { data } or { error }; null while loading
 export type DetailState = { data?: RequirementDetail; error?: string } | null;
@@ -78,6 +87,11 @@ export default function RequirementPanel({
           {r.status === "merged" && (
             <p className="mt-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-300">
               Merged into {mergedInto ?? "a requirement that no longer exists"}.
+            </p>
+          )}
+          {r.change_request_for && (
+            <p className="mt-3">
+              <ChangeRequestBadge requirement={r} />
             </p>
           )}
           {mergedHere.length > 0 && (

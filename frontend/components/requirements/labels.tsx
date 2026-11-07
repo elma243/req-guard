@@ -50,6 +50,16 @@ export function ReviewBadge({ requirement: r }: { requirement: Requirement }) {
   return null;
 }
 
+// A possible change to an accepted requirement (pair checks): kept visible so scope growth is noticed
+export function ChangeRequestBadge({ requirement: r }: { requirement: Requirement }) {
+  if (!r.change_request_for) return null;
+  return (
+    <span className={`${BADGE} bg-orange-400/10 text-orange-300 ring-orange-400/30`}>
+      Change request for {r.change_request_for.code}
+    </span>
+  );
+}
+
 export function ModelBadge({ model }: { model: string | null }) {
   if (model === RULE_BASED_MODEL) {
     return <span className={`${BADGE} bg-amber-400/10 text-amber-300 ring-amber-400/30`}>Rule-based</span>;

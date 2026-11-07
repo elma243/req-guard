@@ -8,6 +8,7 @@ import SourceBadge, { sourceLabel } from "@/components/SourceBadge";
 import { ErrorBanner, NoticeBanner, errorText, inputClass, primaryButton, secondaryButton } from "@/components/ui";
 import {
   MESSAGE_SOURCES,
+  SIMILARITY_UNAVAILABLE,
   deleteMessage,
   extractRequirements,
   listMessages,
@@ -367,6 +368,12 @@ function ExtractRequirements({ projectId }: { projectId: string }) {
       {result && (
         <div className="mt-3 space-y-2">
           {result.notice && <NoticeBanner message={result.notice} detail={result.ai_error} />}
+          {result.similarity_unavailable_reason && (
+            <NoticeBanner
+              message={SIMILARITY_UNAVAILABLE}
+              detail={`${result.similarity_unavailable_reason} Duplicates, conflicts and change requests were not looked for.`}
+            />
+          )}
           <p className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3.5 py-2.5 text-sm text-emerald-200">
             {result.messages_processed === 0 ? (
               "No new messages to read. Tick “Include already processed messages” to read them again."

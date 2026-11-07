@@ -18,6 +18,7 @@ import {
   REQUIREMENT_STATUSES,
   RULE_BASED_MODEL,
   RULE_BASED_NOTICE,
+  SIMILARITY_UNAVAILABLE,
   acceptRequirement,
   bulkRequirements,
   getRequirement,
@@ -37,6 +38,7 @@ import MergeDialog from "./MergeDialog";
 import RejectDialog from "./RejectDialog";
 import RequirementPanel, { type DetailState } from "./RequirementPanel";
 import RequirementTable, { TableSkeleton } from "./RequirementTable";
+import ScopeGrowthChart from "./ScopeGrowthChart";
 import { Kbd } from "./labels";
 
 type StatusFilter = RequirementStatus | "all";
@@ -51,8 +53,11 @@ const DETAIL_DELAY_MS = 120;
 const PAST_TENSE: Record<ReviewAction, string> = { accept: "accepted", reject: "rejected" };
 
 // The whole project is loaded once, so filters answer instantly and each status can show its count
-function matches(r: Requirement, type: RequirementType | "", source: string, issuesOnly: boolean, query: string) {
-  if (issuesOnly && !r.has_issues) return false;
+type Toggles = { issuesOnly: boolean; changesOnly: boolean };
+
+function matches(r: Requirement, type: RequirementType | "", source: string, toggles: Toggles, query: string) {
+  if (toggles.issuesOnly && !r.has_issues) return false;
+  if (toggles.changesOnly && !r.change_request_for) return false;
   if (type && r.current.type !== type) return false;
   if (source && !r.sources.some((s) => s.source === source)) return false;
   if (!query) return true;
@@ -73,6 +78,9 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   const [typeFilter, setTypeFilter] = useState<RequirementType | "">("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [issuesOnly, setIssuesOnly] = useState(false);
+  const [changesOnly, setChangesOnly] = useState(false);
+  // Why the last Validate could not run the duplicate / conflict checks
+  const [similarityIssue, setSimilarityIssue] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [validating, setValidating] = useState(false);
 
@@ -102,8 +110,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
 
   // Rows that pass every filter but status: the status chips count these
   const unfiltered = useMemo(
-    () => (data ?? []).filter((r) => matches(r, typeFilter, sourceFilter, issuesOnly, query)),
-    [data, typeFilter, sourceFilter, issuesOnly, query],
+    () => (data ?? []).filter((r) => matches(r, typeFilter, sourceFilter, { issuesOnly, changesOnly }, query)),
+    [data, typeFilter, sourceFilter, issuesOnly, changesOnly, query],
   );
   const counts = useMemo(() => {
     const byStatus: Partial<Record<RequirementStatus, number>> = {};
@@ -118,8 +126,9 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   const sources = useMemo(() => [...new Set((data ?? []).flatMap((r) => r.sources.map((s) => s.source)))].sort(), [data]);
   const codes = useMemo(() => new Map((data ?? []).map((r) => [r.id, r.code])), [data]);
 
-  const otherFilters = Boolean(typeFilter || sourceFilter || issuesOnly || query);
+  const otherFilters = Boolean(typeFilter || sourceFilter || issuesOnly || changesOnly || query);
   const issueCount = useMemo(() => (data ?? []).filter((r) => r.has_issues).length, [data]);
+  const changeCount = useMemo(() => (data ?? []).filter((r) => r.change_request_for).length, [data]);
 
   // Filtered out = no active row, so nothing can act on a requirement you cannot see
   const active = visible.find((r) => r.id === activeId) ?? null;
@@ -181,10 +190,14 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     if (validating) return;
     setValidating(true);
     try {
-      const { validated, with_issues } = await validateRequirements(projectId);
+      const { validated, with_issues, findings, similarity_unavailable_reason } = await validateRequirements(projectId);
       refreshList();
       setDetailReload((n) => n + 1);
-      show("info", `Validated ${validated} requirements. ${with_issues} may have issues.`);
+      setSimilarityIssue(similarity_unavailable_reason);
+      show(
+        "info",
+        `Validated ${validated} requirements: ${findings} possible ${findings === 1 ? "issue" : "issues"} in ${with_issues}.`,
+      );
     } catch (err) {
       show("error", `Could not validate: ${errorText(err)}`);
     } finally {
@@ -413,6 +426,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     setTypeFilter("");
     setSourceFilter("");
     setIssuesOnly(false);
+    setChangesOnly(false);
     setSearch("");
   }
 
@@ -441,6 +455,16 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
         </div>
       )}
 
+      {similarityIssue && (
+        <div className="mt-6">
+          <NoticeBanner
+            message={SIMILARITY_UNAVAILABLE}
+            detail={`${similarityIssue} The other checks ran; duplicates, conflicts and change requests were not looked for.`}
+          />
+        </div>
+      )}
+      {data && <ScopeGrowthChart requirements={data} />}
+
       {data && data.length > 0 && (
         <div className="mt-6 space-y-3">
           <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
@@ -454,6 +478,12 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
                 count={issueCount}
                 on={issuesOnly}
                 onClick={() => setIssuesOnly(!issuesOnly)}
+              />
+              <StatusChip
+                label="Change requests"
+                count={changeCount}
+                on={changesOnly}
+                onClick={() => setChangesOnly(!changesOnly)}
               />
               <button type="button" onClick={() => void validate()} disabled={validating} className={primaryButton}>
                 {validating ? "Validating..." : "Validate"}
