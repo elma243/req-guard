@@ -29,6 +29,9 @@ from app.connectors import http as connector_http  # noqa: E402
 from app.core import email as mailer  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.ratelimit import limiter  # noqa: E402
+from app.nlp import nli, similarity  # noqa: E402
+from app.nlp.similarity import ModelUnavailable  # noqa: E402
+from tests.fake_models import FakeModels  # noqa: E402
 
 API_FIXTURES = Path(__file__).parent / "fixtures" / "api"
 
@@ -50,6 +53,27 @@ def no_auth_rate_limit(monkeypatch):
     """Tests share one client address; rate limit tests set the real limit themselves."""
     limiter.reset()
     monkeypatch.setattr(settings, "auth_rate_limit_per_minute", 10_000)
+
+
+@pytest.fixture(autouse=True)
+def fake_models(monkeypatch):
+    """The similarity models are always fakes in tests: nothing imports torch or downloads a model.
+
+    test_similarity_models.py (RUN_MODEL_TESTS=1) is the only place that uses the real ones.
+    """
+    models = FakeModels()
+
+    def model(fake):
+        def get():
+            if models.unavailable:
+                raise ModelUnavailable(models.unavailable)
+            return fake
+
+        return get
+
+    monkeypatch.setattr(similarity, "get_embedder", model(models.embedder))
+    monkeypatch.setattr(nli, "get_nli", model(models.nli))
+    return models
 
 
 class Outbox(list):
