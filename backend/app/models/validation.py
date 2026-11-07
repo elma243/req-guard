@@ -13,6 +13,9 @@ PAIR_CATEGORIES = ("duplicate", "conflict", "change_request")
 FINDING_CATEGORIES = RULE_CATEGORIES + PAIR_CATEGORIES
 FINDING_SEVERITIES = ("low", "medium", "high")
 FINDING_STATUSES = ("suggested", "accepted", "edited", "rejected")
+# Pair findings only: "confirmed" when the LLM agreed with the models, "unconfirmed" when no LLM answered (the
+# thresholds alone found it)
+CONFIRMATIONS = ("confirmed", "unconfirmed")
 
 
 class ValidationFinding(Base):
@@ -28,6 +31,7 @@ class ValidationFinding(Base):
         CheckConstraint(f"severity IN {FINDING_SEVERITIES}", name="severity"),
         CheckConstraint(f"origin IN {ORIGINS}", name="origin"),
         CheckConstraint(f"status IN {FINDING_STATUSES}", name="status"),
+        CheckConstraint(f"confirmation IS NULL OR confirmation IN {CONFIRMATIONS}", name="confirmation"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -46,6 +50,9 @@ class ValidationFinding(Base):
         ForeignKey("requirements.id", ondelete="CASCADE"), index=True
     )
     score: Mapped[float | None] = mapped_column(Float)
+    # Pair findings only: whether the LLM checked the pair, and its one-sentence reason
+    confirmation: Mapped[str | None] = mapped_column(String(20))
+    explanation: Mapped[str | None] = mapped_column(Text)
     origin: Mapped[str] = mapped_column(String(10), default="ai")
     status: Mapped[str] = mapped_column(String(20), default="suggested")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

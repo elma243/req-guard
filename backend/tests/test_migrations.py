@@ -36,7 +36,10 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
         "ck_validation_findings_severity",
         "ck_validation_findings_origin",
         "ck_validation_findings_status",
+        "ck_validation_findings_confirmation",
     }
+    assert {"confirmation", "explanation"} <= {c["name"] for c in inspect(engine).get_columns("validation_findings")}
+    assert "requirement_pair_verdicts" in inspect(engine).get_table_names()
     assert {"quality_score", "quality_failed", "module_name", "module_score"} <= {
         c["name"] for c in inspect(engine).get_columns("requirements")
     }
@@ -68,6 +71,7 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("validation_findings", "requirements") == "CASCADE"
     assert on_delete("email_otps", "users") == "CASCADE"
     assert on_delete("requirement_embeddings", "requirement_versions") == "CASCADE"
+    assert on_delete("requirement_pair_verdicts", "requirement_versions") == "CASCADE"
     related = [
         fk
         for fk in inspect(engine).get_foreign_keys("validation_findings")

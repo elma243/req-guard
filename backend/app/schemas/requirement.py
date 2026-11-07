@@ -81,6 +81,9 @@ class ValidationFindingOut(BaseModel):
     related_code: str | None = None
     related_statement: str | None = None
     score: float | None = None
+    # Pair findings: "confirmed" when the LLM agreed, "unconfirmed" when no LLM answered; and the LLM's reason
+    confirmation: Literal["confirmed", "unconfirmed"] | None = None
+    explanation: str | None = None
     origin: Literal["ai", "user"]
     status: Literal["suggested", "accepted", "edited", "rejected"]
     created_at: UtcDatetime

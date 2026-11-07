@@ -3,6 +3,7 @@
 from app.models.auth_token import EmailOtp, PasswordResetToken
 from app.models.embedding import RequirementEmbedding
 from app.models.message import Message
+from app.models.pair_verdict import PairVerdict
 from app.models.project import Project
 from app.models.requirement import Requirement, RequirementSource, RequirementVersion
 from app.models.source import Source
@@ -13,6 +14,7 @@ from app.models.validation import ValidationFinding
 __all__ = [
     "EmailOtp",
     "Message",
+    "PairVerdict",
     "PasswordResetToken",
     "Project",
     "Requirement",

@@ -3,9 +3,10 @@
 import pytest
 from sqlalchemy import select
 
-from app.models import Project, Requirement, RequirementEmbedding, RequirementVersion, User
+from app.models import PairVerdict, Project, Requirement, RequirementEmbedding, RequirementVersion, User
 from app.nlp.pair_checks import check_similarity
 from app.nlp.validate import validate_project, validate_requirement
+from tests.fake_llm import FakeLLM
 from tests.fake_models import BASE, vector_at
 
 A = "The customer shall pay by card."
@@ -241,3 +242,125 @@ def test_a_model_failing_while_it_runs_gives_a_reason(db, project, similar, monk
 
     monkeypatch.setattr(similar.nli, "contradiction", broken)
     assert run(db, project) == "The similarity checks failed: out of memory"
+
+
+# ---------- the LLM's check ----------
+
+RESET = "The system shall allow users to reset their password via email."
+VERIFY = "The system shall require users to verify their email after logging in."
+TWO_SECONDS = "The system shall ensure that every page loads within 2 seconds."
+FIVE_SECONDS = "The system shall load each page within 5 seconds."
+
+
+@pytest.fixture
+def llm():
+    return FakeLLM()
+
+
+def llm_run(db, project, llm, changed=None) -> str | None:
+    reason = check_similarity(db, project, changed, llm)
+    db.commit()
+    return reason
+
+
+def checked(requirement):
+    return [
+        (f.category, f.related_code, f.confirmation, f.explanation)
+        for f in requirement.findings
+        if f.category in ("duplicate", "conflict", "change_request")
+    ]
+
+
+def test_the_llm_drops_a_related_but_different_pair(db, project, fake_models, llm):
+    """Real data: "reset password via email" was a change request for accepted "verify email after login"."""
+    fake_models.embedder.vectors.update({VERIFY: BASE, RESET: vector_at(0.8)})
+    llm.relate(VERIFY, RESET, "related_but_different")
+    add(db, project, VERIFY, 1, status="accepted")
+    reset = add(db, project, RESET, 2)
+    llm_run(db, project, llm)
+    assert checked(reset) == []
+    assert llm.pair_calls == [[{"pair_id": "p1", "older": VERIFY, "newer": RESET}]]
+
+
+def test_the_llm_confirms_a_change_request_and_its_reason_is_stored(db, project, fake_models, llm):
+    fake_models.embedder.vectors.update({TWO_SECONDS: BASE, FIVE_SECONDS: vector_at(0.87)})
+    llm.relate(TWO_SECONDS, FIVE_SECONDS, "change_request")
+    add(db, project, TWO_SECONDS, 1, status="accepted")
+    five = add(db, project, FIVE_SECONDS, 2)
+    llm_run(db, project, llm)
+    assert checked(five) == [("change_request", "REQ-001", "confirmed", "Fake reason: change_request.")]
+
+
+def test_no_llm_keeps_the_candidate_unconfirmed_until_one_answers(db, project, similar, llm):
+    add(db, project, A, 1)
+    new = add(db, project, B, 2)
+    run(db, project)  # no LLM
+    assert checked(new) == [("duplicate", "REQ-001", "unconfirmed", None)]
+    llm.relate(A, B, "same")
+    llm_run(db, project, llm)
+    assert checked(new) == [("duplicate", "REQ-001", "confirmed", "Fake reason: same.")]
+
+
+def test_an_llm_error_keeps_the_candidate_unconfirmed(db, project, similar, llm):
+    llm.pairs_fail = True
+    add(db, project, A, 1)
+    new = add(db, project, B, 2)
+    assert llm_run(db, project, llm) is None  # the models ran; only the LLM failed
+    assert checked(new) == [("duplicate", "REQ-001", "unconfirmed", None)]
+
+
+def test_answers_are_kept_and_not_asked_again(db, project, similar, llm):
+    llm.relate(A, B, "duplicate")
+    add(db, project, A, 1)
+    add(db, project, B, 2)
+    llm_run(db, project, llm)
+    llm_run(db, project, llm)
+    assert len(llm.pair_calls) == 1
+    (verdict,) = db.scalars(select(PairVerdict)).all()
+    assert (verdict.relation, verdict.reason, verdict.ai_model) == ("duplicate", "Fake reason: duplicate.", "fake-model")
+
+
+def test_not_enough_information_is_asked_again(db, project, similar, llm):
+    add(db, project, A, 1)
+    new = add(db, project, B, 2)
+    llm_run(db, project, llm)  # the fake answers "not_enough_information" by default
+    llm_run(db, project, llm)
+    assert len(llm.pair_calls) == 2
+    assert db.scalars(select(PairVerdict)).all() == []
+    assert checked(new) == [("duplicate", "REQ-001", "unconfirmed", "Fake reason: not_enough_information.")]
+
+
+def test_a_new_version_is_asked_again(db, project, similar, llm):
+    llm.relate(A, B, "related_but_different")
+    add(db, project, A, 1)
+    new = add(db, project, B, 2)
+    llm_run(db, project, llm)
+    assert checked(new) == []
+    edited = "The buyer shall pay with a card!"
+    similar.embedder.vectors[edited] = vector_at(0.9)
+    llm.relate(A, edited, "duplicate")
+    new.versions.append(RequirementVersion(version=2, statement=edited, type="functional", actor="", origin="user"))
+    db.commit()
+    llm_run(db, project, llm, [new.id])
+    assert [c[0] for c in checked(new)] == ["duplicate"]
+    assert len(llm.pair_calls) == 2
+
+
+def test_pairs_are_sent_in_batches(db, project, fake_models, llm):
+    for n in range(1, 8):
+        statement = f"The customer shall pay by card number {n}."
+        fake_models.embedder.vectors[statement] = BASE  # all alike: 7 * 6 / 2 = 21 candidate pairs
+        add(db, project, statement, n)
+    llm_run(db, project, llm)
+    assert [len(call) for call in llm.pair_calls] == [15, 6]
+
+
+def test_a_decided_finding_is_not_changed_by_the_llm(db, project, similar, llm):
+    add(db, project, A, 1)
+    new = add(db, project, B, 2)
+    run(db, project)
+    new.findings[0].status = "accepted"
+    db.commit()
+    llm.relate(A, B, "unrelated")
+    llm_run(db, project, llm)
+    assert checked(new) == [("duplicate", "REQ-001", "unconfirmed", None)]

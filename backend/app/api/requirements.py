@@ -139,22 +139,22 @@ def extract(
         llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
     )
     result.similarity_unavailable_reason = validate_project(
-        db, project, only_new=True
+        db, project, only_new=True, llm=llm
     ).similarity_unavailable_reason
     db.commit()
     return result
 
 
 @router.post("/validate", response_model=ValidateResult)
-def validate(project: OwnedProject, db: DbSession) -> ValidateResult:
+def validate(project: OwnedProject, db: DbSession, llm: OptionalLLM) -> ValidateResult:
     """Run every check on every requirement, for example after the modules changed."""
-    result = validate_project(db, project)
+    result = validate_project(db, project, llm=llm)
     db.commit()
     return result
 
 
 @router.post("/bulk", response_model=BulkResult)
-def bulk_review(body: BulkRequest, project: OwnedProject, db: DbSession) -> BulkResult:
+def bulk_review(body: BulkRequest, project: OwnedProject, db: DbSession, llm: OptionalLLM) -> BulkResult:
     """Accept, reject or undo many at once, in one transaction.
 
     An id outside this project fails the whole call and changes nothing. A requirement the action does not
@@ -186,7 +186,7 @@ def bulk_review(body: BulkRequest, project: OwnedProject, db: DbSession) -> Bulk
             skipped.append(BulkSkipped(id=requirement.id, code=requirement.code, reason=exc.detail))
         else:
             updated.append(requirement)
-    check_similarity(db, project, [r.id for r in updated])
+    check_similarity(db, project, [r.id for r in updated], llm)
     db.commit()
     return BulkResult(updated=[_out(_get(db, project, r.id)) for r in updated], skipped=skipped)
 
@@ -226,7 +226,12 @@ def get_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -
 
 @router.patch("/{requirement_id}", response_model=RequirementDetail)
 def edit_requirement(
-    requirement_id: int, body: RequirementUpdate, project: OwnedProject, db: DbSession, user: CurrentUser
+    requirement_id: int,
+    body: RequirementUpdate,
+    project: OwnedProject,
+    db: DbSession,
+    user: CurrentUser,
+    llm: OptionalLLM,
 ) -> RequirementDetail:
     """Save the change as a new version (the old versions stay as they are) and mark the requirement edited."""
     requirement = _get(db, project, requirement_id)
@@ -255,7 +260,7 @@ def edit_requirement(
     requirement.previous_status = None  # an undo must not jump over this edit
     validate_requirement(requirement, project)
     db.flush()  # the new version needs its id for the embedding
-    check_similarity(db, project, [requirement.id])
+    check_similarity(db, project, [requirement.id], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -279,28 +284,30 @@ def _undo(requirement: Requirement) -> None:
 
 
 @router.post("/{requirement_id}/accept", response_model=RequirementDetail)
-def accept_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+def accept_requirement(
+    requirement_id: int, project: OwnedProject, db: DbSession, llm: OptionalLLM
+) -> RequirementDetail:
     _review(_get(db, project, requirement_id), "accepted")
-    check_similarity(db, project, [requirement_id])
+    check_similarity(db, project, [requirement_id], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
 
 @router.post("/{requirement_id}/reject", response_model=RequirementDetail)
 def reject_requirement(
-    requirement_id: int, project: OwnedProject, db: DbSession, body: RejectRequest | None = None
+    requirement_id: int, project: OwnedProject, db: DbSession, llm: OptionalLLM, body: RejectRequest | None = None
 ) -> RequirementDetail:
     _review(_get(db, project, requirement_id), "rejected", body.reason if body else None)
-    check_similarity(db, project, [requirement_id])
+    check_similarity(db, project, [requirement_id], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
 
 @router.post("/{requirement_id}/undo", response_model=RequirementDetail)
-def undo_review(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+def undo_review(requirement_id: int, project: OwnedProject, db: DbSession, llm: OptionalLLM) -> RequirementDetail:
     """Take back the last accept / reject: the status returns to what it was."""
     _undo(_get(db, project, requirement_id))
-    check_similarity(db, project, [requirement_id])
+    check_similarity(db, project, [requirement_id], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -330,7 +337,9 @@ def _take_back_merged_sources(db: Session, project: Project, requirement: Requir
 
 
 @router.post("/{requirement_id}/restore", response_model=RequirementDetail)
-def restore_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+def restore_requirement(
+    requirement_id: int, project: OwnedProject, db: DbSession, llm: OptionalLLM
+) -> RequirementDetail:
     """Bring a rejected or merged requirement back to "suggested" for a new review."""
     requirement = _get(db, project, requirement_id)
     if requirement.status not in ("rejected", "merged"):
@@ -347,14 +356,14 @@ def restore_requirement(requirement_id: int, project: OwnedProject, db: DbSessio
     requirement.previous_status = None
     if target is not None:  # it lost source sentences
         validate_requirement(target, project)
-    check_similarity(db, project, [requirement_id])
+    check_similarity(db, project, [requirement_id], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
 
 @router.post("/{requirement_id}/merge", response_model=RequirementDetail)
 def merge_requirements(
-    requirement_id: int, body: MergeRequest, project: OwnedProject, db: DbSession
+    requirement_id: int, body: MergeRequest, project: OwnedProject, db: DbSession, llm: OptionalLLM
 ) -> RequirementDetail:
     """Fold other requirements into this one: their source sentences are added here, they become "merged"."""
     target = _get(db, project, requirement_id)
@@ -381,6 +390,6 @@ def merge_requirements(
         other.previous_status = None
     target.previous_status = None
     validate_requirement(target, project)  # it gained source sentences
-    check_similarity(db, project, [target.id, *other_ids])
+    check_similarity(db, project, [target.id, *other_ids], llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))

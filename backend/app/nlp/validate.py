@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.ai.llm import LLMClient
 from app.models import Project, Requirement, ValidationFinding
 from app.models.validation import PAIR_CATEGORIES
 from app.nlp.extraction import count_requirement_cues, has_requirement_cue
@@ -364,11 +365,14 @@ def validate_requirement(requirement: Requirement, project: Project) -> None:
     requirement.module_name, requirement.module_score = module or (None, None)
 
 
-def validate_project(db: Session, project: Project, *, only_new: bool = False) -> ValidateResult:
+def validate_project(
+    db: Session, project: Project, *, only_new: bool = False, llm: LLMClient | None = None
+) -> ValidateResult:
     """Validate every requirement of the project, or with `only_new` those never validated. The caller commits.
 
     The pair checks run too: on every pair, or with `only_new` on the pairs with a new requirement. When their
-    models are unavailable the rule-based findings are still stored and the result says why.
+    models are unavailable the rule-based findings are still stored and the result says why. `llm` checks the
+    pairs the models flag (see app/nlp/pair_checks.py).
     """
     query = (
         select(Requirement)
@@ -384,7 +388,7 @@ def validate_project(db: Session, project: Project, *, only_new: bool = False) -
     requirements = db.scalars(query).all()
     for requirement in requirements:
         validate_requirement(requirement, project)
-    unavailable = check_similarity(db, project, [r.id for r in requirements] if only_new else None)
+    unavailable = check_similarity(db, project, [r.id for r in requirements] if only_new else None, llm)
     return ValidateResult(
         validated=len(requirements),
         with_issues=sum(1 for r in requirements if r.has_issues),

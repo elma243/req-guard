@@ -5,6 +5,7 @@ import pytest
 from app.api.deps import get_optional_llm_client
 from app.main import app
 from app.models import RequirementEmbedding
+from tests.fake_llm import FakeLLM
 from tests.fake_models import BASE, vector_at
 
 # Rule-based extraction keeps each client sentence as the statement. With the bag-of-words fake embedder the
@@ -158,3 +159,27 @@ def test_validate_button_checks_every_pair(client, owner, fake_models, db_sessio
     result = post(client, owner, "/validate")
     assert result["similarity_unavailable_reason"] is None
     assert ("conflict", "REQ-001", "suggested") in pair_findings(client, owner, items["REQ-003"]["id"])
+
+
+def test_the_llm_check_is_in_the_response(client, owner):
+    extract(client, owner)
+    items = listed(client, owner)
+    old, new = (items[c]["current"]["statement"] for c in ("REQ-001", "REQ-002"))
+    finding = detail(client, owner, items["REQ-002"]["id"])["findings"][-1]
+    assert (finding["confirmation"], finding["explanation"]) == ("unconfirmed", None)  # extracted without an LLM
+
+    llm = FakeLLM()
+    llm.relate(old, new, "duplicate")
+    app.dependency_overrides[get_optional_llm_client] = lambda: llm
+    post(client, owner, "/validate")
+    finding = detail(client, owner, items["REQ-002"]["id"])["findings"][-1]
+    assert (finding["category"], finding["confirmation"], finding["explanation"]) == (
+        "duplicate",
+        "confirmed",
+        "Fake reason: duplicate.",
+    )
+
+    llm.relations.clear()
+    llm.default_relation = "unrelated"  # a new answer is only asked for new versions: this one is kept
+    post(client, owner, "/validate")
+    assert pair_findings(client, owner, items["REQ-002"]["id"]) == [("duplicate", "REQ-001", "suggested")]

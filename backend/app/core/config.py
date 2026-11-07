@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     similarity_enabled: bool = True
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     nli_model: str = "cross-encoder/nli-deberta-v3-small"
+    # Similarity to an ACCEPTED requirement from which a different statement may be a change request. Below it,
+    # similar requirements are usually separate features (e.g. "reset password by email" vs "verify email").
+    change_request_similarity: float = 0.75
 
     # Connectors
     jira_base_url: str | None = None
