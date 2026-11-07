@@ -7,7 +7,8 @@ Text is NFC-normalised before matching, because ড় ঢ় য় can be type
 are usually English, but the rule-based extraction fallback stores the client's own Bangla or Banglish sentence
 as the statement, so every rule handles all three languages.
 
-validate_requirement stores the result; the rules themselves need no database.
+validate_requirement stores the result; the rules themselves need no database. Checks that compare two
+requirements (duplicates, conflicts, change requests) are in app/nlp/pair_checks.py; validate_project runs both.
 """
 
 import re
@@ -19,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Project, Requirement, ValidationFinding
+from app.models.validation import PAIR_CATEGORIES
 from app.nlp.extraction import count_requirement_cues, has_requirement_cue
 from app.nlp.lexicon import (
     ACTION_VERBS,
@@ -33,6 +35,7 @@ from app.nlp.lexicon import (
     UNITS_BANGLA,
     VAGUE_WORDS,
 )
+from app.nlp.pair_checks import check_similarity
 from app.schemas.requirement import ValidateResult
 
 # Word characters. \w alone misses Bengali vowel signs, which is also why \b is unreliable in Bangla text.
@@ -313,6 +316,7 @@ def validate_requirement(requirement: Requirement, project: Project) -> None:
 
     Rule 2: only findings that are still origin "ai" and status "suggested" are updated or removed. A finding a
     person decided on stays as it is and is not added again, and a rejected one no longer fails its criterion.
+    Pair findings belong to app/nlp/pair_checks.py and are left alone here.
     """
     current = requirement.current
     item = RequirementInput(
@@ -328,7 +332,7 @@ def validate_requirement(requirement: Requirement, project: Project) -> None:
     wanted = {d.key: d for d in drafts}
 
     for finding in list(requirement.findings):
-        if finding.origin != "ai" or finding.status != "suggested":
+        if finding.origin != "ai" or finding.status != "suggested" or finding.category in PAIR_CATEGORIES:
             continue
         draft = wanted.get((finding.rule, finding.evidence))
         if draft is None:
@@ -361,7 +365,11 @@ def validate_requirement(requirement: Requirement, project: Project) -> None:
 
 
 def validate_project(db: Session, project: Project, *, only_new: bool = False) -> ValidateResult:
-    """Validate every requirement of the project, or with `only_new` those never validated. The caller commits."""
+    """Validate every requirement of the project, or with `only_new` those never validated. The caller commits.
+
+    The pair checks run too: on every pair, or with `only_new` on the pairs with a new requirement. When their
+    models are unavailable the rule-based findings are still stored and the result says why.
+    """
     query = (
         select(Requirement)
         .where(Requirement.project_id == project.id)
@@ -376,8 +384,10 @@ def validate_project(db: Session, project: Project, *, only_new: bool = False) -
     requirements = db.scalars(query).all()
     for requirement in requirements:
         validate_requirement(requirement, project)
+    unavailable = check_similarity(db, project, [r.id for r in requirements] if only_new else None)
     return ValidateResult(
         validated=len(requirements),
         with_issues=sum(1 for r in requirements if r.has_issues),
         findings=sum(r.open_findings for r in requirements),
+        similarity_unavailable_reason=unavailable,
     )

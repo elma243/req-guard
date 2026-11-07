@@ -150,3 +150,6 @@ class ValidateResult(BaseModel):
     with_issues: int
     # Findings not rejected by a person
     findings: int
+    # Why the duplicate / conflict / change request checks could not run (models switched off or not loadable);
+    # None when they ran. The rule-based checks run either way.
+    similarity_unavailable_reason: str | None = None

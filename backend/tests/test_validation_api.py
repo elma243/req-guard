@@ -242,7 +242,12 @@ def test_validate_counts_issues(client, extracted):
 
 
 def test_validate_with_no_requirements(client, owner):
-    assert validate(client, owner) == {"validated": 0, "with_issues": 0, "findings": 0}
+    assert validate(client, owner) == {
+        "validated": 0,
+        "with_issues": 0,
+        "findings": 0,
+        "similarity_unavailable_reason": None,
+    }
 
 
 def test_validate_gives_a_score_to_requirements_from_before_this_step(client, extracted, db_session_factory):
