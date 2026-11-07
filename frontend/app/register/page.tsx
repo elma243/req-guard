@@ -3,59 +3,68 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import AuthShell, { FormError, SubmitButton, authInputClass } from "@/components/AuthShell";
-import { register } from "@/lib/api";
+import AuthShell, { AuthField, FormError, SubmitButton } from "@/components/AuthShell";
+import PasswordStrength from "@/components/PasswordStrength";
+import { ApiError, register } from "@/lib/api";
+import { confirmError, emailError, nameError, passwordError } from "@/lib/authRules";
 
 // ReqGuard — Create account page (http://localhost:3000/register)
 
-type Fields = "name" | "email" | "password" | "confirm";
+type Field = "name" | "email" | "password" | "confirm_password";
+type Values = Record<Field, string>;
+type Errors = Partial<Record<Field, string>>;
+
+const FIELDS: { id: Field; label: string; type: string; autoComplete: string; placeholder: string }[] = [
+  { id: "name", label: "Name", type: "text", autoComplete: "name", placeholder: "Your name" },
+  { id: "email", label: "Email", type: "email", autoComplete: "email", placeholder: "you@example.com" },
+  { id: "password", label: "Password", type: "password", autoComplete: "new-password", placeholder: "At least 8 characters" },
+  { id: "confirm_password", label: "Confirm password", type: "password", autoComplete: "new-password", placeholder: "Type it again" },
+];
+
+function liveErrors(values: Values): Errors {
+  return {
+    name: nameError(values.name),
+    email: emailError(values.email),
+    password: passwordError(values.password, values.email),
+    confirm_password: confirmError(values.password, values.confirm_password),
+  };
+}
 
 export default function RegisterPage() {
   const router = useRouter();
-  const [values, setValues] = useState<Record<Fields, string>>({ name: "", email: "", password: "", confirm: "" });
-  const [errors, setErrors] = useState<Partial<Record<Fields, string>>>({});
+  const [values, setValues] = useState<Values>({ name: "", email: "", password: "", confirm_password: "" });
+  const [touched, setTouched] = useState<Partial<Record<Field, boolean>>>({});
+  const [serverErrors, setServerErrors] = useState<Errors>({});
   const [formError, setFormError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const set = (field: Fields) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setValues((v) => ({ ...v, [field]: e.target.value }));
+  const live = liveErrors(values);
+  // A field stays quiet until the user leaves it, then updates on every key press
+  const errorOf = (field: Field) => serverErrors[field] ?? (touched[field] ? live[field] : undefined);
 
-  // Same rules as the backend (app/schemas/auth.py)
-  function validate() {
-    const e: Partial<Record<Fields, string>> = {};
-    if (!values.name.trim()) e.name = "Name is required.";
-    else if (values.name.trim().length > 100) e.name = "Name must be at most 100 characters.";
-    if (!values.email.trim()) e.email = "Email is required.";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) e.email = "Enter a valid email address.";
-    if (values.password.length < 8) e.password = "Password must be at least 8 characters.";
-    else if (values.password.length > 128) e.password = "Password must be at most 128 characters.";
-    if (values.confirm !== values.password) e.confirm = "Passwords do not match.";
-    setErrors(e);
-    return Object.keys(e).length === 0;
+  function change(field: Field, value: string) {
+    setValues((v) => ({ ...v, [field]: value }));
+    setServerErrors((e) => ({ ...e, [field]: undefined }));
   }
 
   async function handleSubmit(ev: React.FormEvent) {
     ev.preventDefault();
     setFormError("");
-    if (!validate()) return;
+    setTouched({ name: true, email: true, password: true, confirm_password: true });
+    if (Object.values(live).some(Boolean)) return;
 
     setLoading(true);
+    const email = values.email.trim();
     try {
-      await register(values.name.trim(), values.email.trim(), values.password);
-      router.replace("/projects");
-      router.refresh();
+      await register({ ...values, name: values.name.trim(), email });
+      router.replace(`/verify-email?email=${encodeURIComponent(email)}&sent=1`);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Something went wrong.");
       setLoading(false);
+      if (err instanceof ApiError && err.status === 409) setServerErrors({ email: err.message });
+      else if (err instanceof ApiError && Object.keys(err.fields).length > 0) setServerErrors(err.fields);
+      else setFormError(err instanceof Error ? err.message : "Something went wrong.");
     }
   }
-
-  const fields: { id: Fields; label: string; type: string; autoComplete: string; placeholder: string }[] = [
-    { id: "name", label: "Name", type: "text", autoComplete: "name", placeholder: "Your name" },
-    { id: "email", label: "Email", type: "email", autoComplete: "email", placeholder: "you@example.com" },
-    { id: "password", label: "Password", type: "password", autoComplete: "new-password", placeholder: "At least 8 characters" },
-    { id: "confirm", label: "Confirm password", type: "password", autoComplete: "new-password", placeholder: "Type it again" },
-  ];
 
   return (
     <AuthShell>
@@ -63,22 +72,20 @@ export default function RegisterPage() {
       <p className="mt-1.5 text-sm text-zinc-400">Start tracing requirements to code and tests.</p>
 
       <form onSubmit={handleSubmit} noValidate className="mt-8 space-y-5">
-        {fields.map((f) => (
+        {FIELDS.map((f) => (
           <div key={f.id}>
-            <label htmlFor={f.id} className="block text-sm font-medium text-zinc-300">
-              {f.label}
-            </label>
-            <input
+            <AuthField
               id={f.id}
+              label={f.label}
               type={f.type}
               autoComplete={f.autoComplete}
-              value={values[f.id]}
-              onChange={set(f.id)}
               placeholder={f.placeholder}
-              aria-invalid={!!errors[f.id]}
-              className={`mt-1.5 ${authInputClass(!!errors[f.id])}`}
+              value={values[f.id]}
+              onChange={(e) => change(f.id, e.target.value)}
+              onBlur={() => setTouched((t) => ({ ...t, [f.id]: true }))}
+              error={errorOf(f.id)}
             />
-            {errors[f.id] && <p className="mt-1.5 text-xs text-rose-400">{errors[f.id]}</p>}
+            {f.id === "password" && <PasswordStrength password={values.password} email={values.email} />}
           </div>
         ))}
 

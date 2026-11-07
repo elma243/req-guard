@@ -1,5 +1,8 @@
-"""Password hashing (Argon2id) and JWT access tokens (HS256)."""
+"""Password hashing (Argon2id), JWT access tokens (HS256) and one-time secrets (OTP, reset token)."""
 
+import hashlib
+import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -11,6 +14,8 @@ from app.core.config import settings
 ALGORITHM = "HS256"
 
 _hasher = PasswordHasher()
+# Checked when the email is unknown, so such a login takes as long as a real one
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))
 
 
 class InvalidTokenError(Exception):
@@ -28,16 +33,36 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def verify_dummy_password(password: str) -> None:
+    """Spend the same time as verify_password when there is no account to check against."""
+    verify_password(password, _DUMMY_HASH)
+
+
 def _secret() -> str:
     if not settings.jwt_secret:
         raise RuntimeError("JWT_SECRET is not set. Add it to backend/.env (see .env.example).")
     return settings.jwt_secret
 
 
-def create_access_token(user_id: int) -> str:
+def generate_otp() -> str:
+    """Six random digits; leading zeros are kept."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def generate_reset_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_secret(value: str) -> str:
+    """Keyed hash of a one-time secret. The key matters: six digits alone are reversed in moments."""
+    return hmac.new(_secret().encode(), value.encode(), hashlib.sha256).hexdigest()
+
+
+def create_access_token(user_id: int, token_version: int) -> str:
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
+        "ver": token_version,
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
@@ -71,14 +96,14 @@ def decode_oauth_state(state: str) -> tuple[int, int]:
         raise InvalidTokenError(str(exc)) from exc
 
 
-def decode_access_token(token: str) -> int:
-    """Return the user id stored in the token, or raise InvalidTokenError."""
+def decode_access_token(token: str) -> tuple[int, int]:
+    """Return (user_id, token_version) stored in the token, or raise InvalidTokenError."""
     try:
         payload = jwt.decode(
-            token, _secret(), algorithms=[ALGORITHM], options={"require": ["sub", "exp"]}
+            token, _secret(), algorithms=[ALGORITHM], options={"require": ["sub", "exp", "ver"]}
         )
         if "purpose" in payload:  # e.g. an OAuth state is not a login token
             raise InvalidTokenError("not an access token")
-        return int(payload["sub"])
-    except (jwt.PyJWTError, ValueError) as exc:
+        return int(payload["sub"]), int(payload["ver"])
+    except (jwt.PyJWTError, ValueError, TypeError) as exc:
         raise InvalidTokenError(str(exc)) from exc

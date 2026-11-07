@@ -1,11 +1,19 @@
+import hashlib
+
 import jwt
 from sqlalchemy import select
 
+from app.core import security
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.models import User
 
-REGISTER = {"name": "Alice", "email": "Alice@Example.com", "password": "password123"}
+REGISTER = {
+    "name": "Alice",
+    "email": "Alice@Example.com",
+    "password": "password123",
+    "confirm_password": "password123",
+}
 
 
 def test_register_returns_user_without_password(client):
@@ -41,8 +49,10 @@ def test_register_rejects_short_password_bad_email_and_blank_name(client):
     assert client.post("/auth/register", json={**REGISTER, "name": "   "}).status_code == 422
 
 
-def test_login_returns_token(client):
+def test_login_returns_token(client, outbox):
     client.post("/auth/register", json=REGISTER)
+    code = outbox.code_for("alice@example.com")
+    client.post("/auth/verify-email", json={"email": "alice@example.com", "code": code})
 
     res = client.post("/auth/login", json={"email": "alice@example.com", "password": "password123"})
 
@@ -60,7 +70,7 @@ def test_login_wrong_password_and_unknown_email_give_same_401(client):
     unknown = client.post("/auth/login", json={"email": "bob@example.com", "password": "password123"})
 
     assert wrong_pw.status_code == unknown.status_code == 401
-    assert wrong_pw.json()["detail"] == unknown.json()["detail"]
+    assert wrong_pw.json()["detail"] == unknown.json()["detail"] == "Email or password is incorrect"
 
 
 def test_me_with_token(client, make_user):
@@ -84,7 +94,7 @@ def test_me_with_garbage_token_is_401(client):
 def test_me_with_expired_token_is_401(client, make_user, monkeypatch):
     user, _ = make_user()
     monkeypatch.setattr(settings, "jwt_expire_minutes", -1)
-    token = create_access_token(user["id"])
+    token = create_access_token(user["id"], 0)
 
     res = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
 
@@ -98,6 +108,36 @@ def test_me_with_token_signed_by_other_secret_is_401(client, make_user):
     res = client.get("/auth/me", headers={"Authorization": f"Bearer {forged}"})
 
     assert res.status_code == 401
+
+
+def test_token_with_an_old_version_is_401(client, make_user, db_session_factory):
+    user, headers = make_user()
+    with db_session_factory() as db:
+        db.get(User, user["id"]).token_version += 1
+        db.commit()
+
+    assert client.get("/auth/me", headers=headers).status_code == 401
+
+
+def test_token_without_a_version_is_401(client, make_user):
+    user, _ = make_user()
+    old = jwt.encode({"sub": str(user["id"]), "exp": 9999999999}, settings.jwt_secret, algorithm="HS256")
+
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {old}"}).status_code == 401
+
+
+def test_otp_is_six_digits_and_keeps_leading_zeros(monkeypatch):
+    monkeypatch.setattr(security.secrets, "randbelow", lambda _: 42)
+
+    assert security.generate_otp() == "000042"
+
+
+def test_secret_hash_is_keyed(monkeypatch):
+    first = security.hash_secret("otp:1:123456")
+    monkeypatch.setattr(settings, "jwt_secret", "another-secret-of-a-reasonable-length-987")
+
+    assert security.hash_secret("otp:1:123456") != first
+    assert first != hashlib.sha256(b"otp:1:123456").hexdigest()
 
 
 def test_token_of_deleted_user_is_401(client, make_user, db_session_factory):

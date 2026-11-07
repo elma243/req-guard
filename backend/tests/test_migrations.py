@@ -4,7 +4,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from app.core.config import settings
 
@@ -41,6 +41,11 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
         c["name"] for c in inspect(engine).get_columns("requirements")
     }
 
+    assert {"email_otps", "password_reset_tokens"} <= set(inspect(engine).get_table_names())
+    assert {"email_verified_at", "failed_logins", "locked_until", "token_version"} <= {
+        c["name"] for c in inspect(engine).get_columns("users")
+    }
+
     # Deleting a project removes its sources and messages in the database itself
     def on_delete(table: str, referred: str) -> str | None:
         fks = inspect(engine).get_foreign_keys(table)
@@ -53,6 +58,8 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("requirement_versions", "requirements") == "CASCADE"
     assert on_delete("requirement_sources", "messages") == "CASCADE"
     assert on_delete("validation_findings", "requirements") == "CASCADE"
+    assert on_delete("email_otps", "users") == "CASCADE"
+    assert on_delete("password_reset_tokens", "users") == "CASCADE"
     merged_from = [
         fk
         for fk in inspect(engine).get_foreign_keys("requirement_sources")
@@ -62,4 +69,24 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
 
     command.downgrade(config, "base")
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
+    engine.dispose()
+
+
+def test_accounts_from_before_the_auth_migration_stay_able_to_log_in(tmp_path, monkeypatch):
+    url = f"sqlite:///{(tmp_path / 'migrate.db').as_posix()}"
+    monkeypatch.setattr(settings, "database_url", url)
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    command.upgrade(config, "d2b3c4e5f6a7")
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO users (name, email, password_hash) VALUES ('Old', 'old@example.com', 'x')")
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT email_verified_at, failed_logins, token_version FROM users")).one()
+    assert row.email_verified_at is not None
+    assert (row.failed_logins, row.token_version) == (0, 0)
     engine.dispose()

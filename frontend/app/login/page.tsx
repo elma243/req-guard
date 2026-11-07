@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import AuthShell, { FormError, SubmitButton, authInputClass, safeNextPath } from "@/components/AuthShell";
-import { login } from "@/lib/api";
+import { ApiError, login } from "@/lib/api";
+import { emailError } from "@/lib/authRules";
 
 // ReqGuard — Login page (http://localhost:3000/login)
 
@@ -16,20 +17,21 @@ export default function LoginPage() {
   const [remember, setRemember] = useState(false);
   const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
   const [formError, setFormError] = useState("");
+  const [needsVerifying, setNeedsVerifying] = useState(false);
   const [loading, setLoading] = useState(false);
 
   function validate() {
     const e: { email?: string; password?: string } = {};
-    if (!email.trim()) e.email = "Email is required.";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = "Enter a valid email address.";
+    e.email = emailError(email);
     if (!password) e.password = "Password is required.";
     setErrors(e);
-    return Object.keys(e).length === 0;
+    return !e.email && !e.password;
   }
 
   async function handleSubmit(ev: React.FormEvent) {
     ev.preventDefault();
     setFormError("");
+    setNeedsVerifying(false);
     if (!validate()) return;
 
     setLoading(true);
@@ -40,6 +42,7 @@ export default function LoginPage() {
       router.refresh();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Something went wrong.");
+      setNeedsVerifying(err instanceof ApiError && err.status === 403);
       setLoading(false);
     }
   }
@@ -93,17 +96,30 @@ export default function LoginPage() {
           {errors.password && <p className="mt-1.5 text-xs text-rose-400">{errors.password}</p>}
         </div>
 
-        <label className="flex cursor-pointer items-center gap-2.5 text-sm text-zinc-400">
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
-            className="h-4 w-4 rounded accent-indigo-500"
-          />
-          Remember me
-        </label>
+        <div className="flex items-center justify-between">
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-zinc-400">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="h-4 w-4 rounded accent-indigo-500"
+            />
+            Remember me
+          </label>
+          <Link href="/forgot-password" className="text-sm font-medium text-indigo-300 transition hover:text-indigo-200">
+            Forgot password?
+          </Link>
+        </div>
 
         <FormError message={formError} />
+        {needsVerifying && (
+          <Link
+            href={`/verify-email?email=${encodeURIComponent(email.trim())}`}
+            className="block text-center text-sm font-medium text-indigo-300 transition hover:text-indigo-200"
+          >
+            Enter your code or get a new one
+          </Link>
+        )}
         <SubmitButton loading={loading} label="Sign in" loadingLabel="Signing in..." />
       </form>
 

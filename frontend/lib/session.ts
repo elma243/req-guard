@@ -4,7 +4,7 @@
 // JavaScript can never read it. Route handlers read the cookie and call FastAPI with
 // "Authorization: Bearer <token>".
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 export const TOKEN_COOKIE = "rg_token";
 
@@ -24,14 +24,27 @@ export function backendTimeout(seconds: number) {
   );
 }
 
+// Tells FastAPI the browser's address, which it cannot see behind this server. The secret proves the header
+// comes from here. x-forwarded-for is set by the hosting platform (Vercel) or by Next.js itself.
+export function clientIpHeaders(request: NextRequest): Record<string, string> {
+  const secret = process.env.PROXY_SHARED_SECRET;
+  const ip = request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim();
+  return secret && ip ? { "X-Client-IP": ip, "X-Proxy-Secret": secret } : {};
+}
+
 // Logs in at FastAPI and returns a response that sets the token cookie.
 // `remember` = false gives a session cookie (deleted when the browser closes).
-export async function loginAndSetCookie(email: string, password: string, remember: boolean) {
+export async function loginAndSetCookie(
+  email: string,
+  password: string,
+  remember: boolean,
+  extraHeaders: Record<string, string> = {},
+) {
   let res: Response;
   try {
     res = await fetch(`${BACKEND_URL}/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...extraHeaders },
       body: JSON.stringify({ email, password }),
       cache: "no-store",
     });

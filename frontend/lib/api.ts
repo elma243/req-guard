@@ -6,6 +6,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public fields: Record<string, string> = {}, // field name -> message, from a validation error
+    public retryAfter: number | null = null, // seconds, from a rate limit
   ) {
     super(message);
   }
@@ -19,6 +21,17 @@ function errorMessage(body: unknown, status: number): string {
   return `Request failed with status ${status}`;
 }
 
+function fieldErrors(body: unknown): Record<string, string> {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (!Array.isArray(detail)) return {};
+  const fields: Record<string, string> = {};
+  for (const error of detail as { loc?: unknown[]; msg?: string }[]) {
+    const field = error.loc?.at(-1);
+    if (typeof field === "string" && error.msg) fields[field] = error.msg;
+  }
+  return fields;
+}
+
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   // For FormData the browser sets "multipart/form-data; boundary=..." itself
   const isForm = init.body instanceof FormData;
@@ -29,7 +42,8 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new ApiError(res.status, errorMessage(body, res.status));
+    const retryAfter = Number(res.headers.get("retry-after")) || null;
+    throw new ApiError(res.status, errorMessage(body, res.status), fieldErrors(body), retryAfter);
   }
 
   if (res.status === 204) return undefined as T;
@@ -70,8 +84,32 @@ export function login(email: string, password: string, remember: boolean) {
   return request<{ ok: true }>("/api/auth/login", { method: "POST", body: json({ email, password, remember }) });
 }
 
-export function register(name: string, email: string, password: string) {
-  return request<{ ok: true }>("/api/auth/register", { method: "POST", body: json({ name, email, password }) });
+export type Registration = { name: string; email: string; password: string; confirm_password: string };
+
+// These go straight through the backend route: the caller is not logged in, so `apiFetch`'s 401 redirect must not apply.
+// The account starts unverified; the emailed code is confirmed on /verify-email.
+function publicPost<T>(path: string, body: unknown) {
+  return request<T>(`/api/backend/auth/${path}`, { method: "POST", body: json(body) });
+}
+
+export function register(data: Registration) {
+  return publicPost<User>("register", data);
+}
+
+export function verifyEmail(email: string, code: string) {
+  return publicPost<{ message: string }>("verify-email", { email, code });
+}
+
+export function resendCode(email: string) {
+  return publicPost<{ message: string }>("resend-code", { email });
+}
+
+export function forgotPassword(email: string) {
+  return publicPost<{ message: string }>("forgot-password", { email });
+}
+
+export function resetPassword(token: string, password: string, confirmPassword: string) {
+  return publicPost<{ message: string }>("reset-password", { token, password, confirm_password: confirmPassword });
 }
 
 export function logout() {

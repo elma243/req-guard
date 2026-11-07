@@ -1,4 +1,6 @@
-// Shared frame for /login and /register: background, product story on the left, form card on the right.
+// Shared frame for the login, sign-up, verification and password pages: background, product story on the left, form card on the right.
+
+import Link from "next/link";
 
 export default function AuthShell({ children }: { children: React.ReactNode }) {
   return (
@@ -100,6 +102,56 @@ export function authInputClass(hasError: boolean) {
   }`;
 }
 
+type AuthFieldProps = React.InputHTMLAttributes<HTMLInputElement> & { id: string; label: string; error?: string };
+
+// Labelled text input with its error message underneath.
+export function AuthField({ id, label, error, ...input }: AuthFieldProps) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm font-medium text-zinc-300">
+        {label}
+      </label>
+      <input
+        id={id}
+        aria-invalid={!!error}
+        aria-describedby={error ? `${id}-error` : undefined}
+        className={`mt-1.5 ${authInputClass(!!error)}`}
+        {...input}
+      />
+      {error && (
+        <p id={`${id}-error`} className="mt-1.5 text-xs text-rose-400">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Shown in place of a form once its step is finished.
+export function SuccessPanel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div role="status">
+      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-300">
+        <CheckIcon size={22} />
+      </span>
+      <h2 className="mt-5 text-2xl font-semibold tracking-tight">{title}</h2>
+      <div className="mt-2 text-sm text-zinc-400">{children}</div>
+    </div>
+  );
+}
+
+// Full-width link styled like the submit button, for the next step after a success.
+export function PrimaryLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="mt-6 flex w-full items-center justify-center rounded-xl bg-linear-to-r from-indigo-500 to-violet-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-violet-400"
+    >
+      {children}
+    </Link>
+  );
+}
+
 export function FormError({ message }: { message: string }) {
   if (!message) return null;
   return (
@@ -121,9 +173,10 @@ export function SubmitButton({ loading, label, loadingLabel }: { loading: boolea
   );
 }
 
-// Only allow redirects to a path on this site (blocks "//evil.com" and "https://...").
+// Only allow redirects to a path on this site. Blocks "//evil.com" and "https://...", and also "/\evil.com",
+// because browsers read a backslash as a slash and drop tabs and line breaks.
 export function safeNextPath(next: string | null): string {
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/projects";
+  return next && next.startsWith("/") && !next.startsWith("//") && !/[\\\s]/.test(next) ? next : "/projects";
 }
 
 export function ShieldIcon({ size = 24 }: { size?: number }) {
@@ -135,9 +188,9 @@ export function ShieldIcon({ size = 24 }: { size?: number }) {
   );
 }
 
-function CheckIcon() {
+function CheckIcon({ size = 12 }: { size?: number }) {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="m5 12 5 5 9-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
