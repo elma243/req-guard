@@ -260,6 +260,15 @@ def _source_key(sources) -> frozenset[tuple[int, str]]:
     return frozenset(sources)
 
 
+def _with_sources_from(message_ids: set[int]):
+    """Ids of requirements with a source sentence in one of these messages, as a subquery.
+
+    Filtering by id instead of joining the sources gives each requirement once without SELECT DISTINCT, which
+    would have to compare whole rows (PostgreSQL cannot compare json values).
+    """
+    return select(RequirementSource.requirement_id).where(RequirementSource.message_id.in_(message_ids))
+
+
 def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> None:
     """Delete untouched AI suggestions that come only from these messages, before re-extracting them.
 
@@ -268,15 +277,12 @@ def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> 
     if not message_ids:
         return
     candidates = db.scalars(
-        select(Requirement)
-        .join(Requirement.sources)
-        .where(
+        select(Requirement).where(
             Requirement.project_id == project_id,
             Requirement.origin == "ai",
             Requirement.status == "suggested",
-            RequirementSource.message_id.in_(message_ids),
+            Requirement.id.in_(_with_sources_from(message_ids)),
         )
-        .distinct()
     ).all()
     merge_targets = set(
         db.scalars(select(Requirement.merged_into_id).where(Requirement.project_id == project_id)).all()
@@ -292,10 +298,9 @@ def _delete_replaceable(db: Session, project_id: int, message_ids: set[int]) -> 
 def _kept_sources(db: Session, project_id: int, message_ids: set[int]) -> Counter:
     """How many kept requirements have each exact set of sources, for the given messages."""
     requirements = db.scalars(
-        select(Requirement)
-        .join(Requirement.sources)
-        .where(Requirement.project_id == project_id, RequirementSource.message_id.in_(message_ids))
-        .distinct()
+        select(Requirement).where(
+            Requirement.project_id == project_id, Requirement.id.in_(_with_sources_from(message_ids))
+        )
     ).all()
     return Counter(_source_key((s.message_id, s.source_sentence) for s in r.sources) for r in requirements)
 
