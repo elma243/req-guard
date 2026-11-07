@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.db import Base
+from app.core.db import Base, JsonType
 
 
 class Project(Base):
@@ -15,7 +15,7 @@ class Project(Base):
     # What the client agreed to build; used later to flag out-of-scope requirements
     scope_text: Mapped[str] = mapped_column(Text, default="")
     # The product's parts, each {"name", "description"}; requirements are matched against them in validation
-    modules: Mapped[list[dict]] = mapped_column(JSON, default=list, server_default="[]")
+    modules: Mapped[list[dict]] = mapped_column(JsonType, default=list, server_default="[]")
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     # Last REQ-number handed out; only grows, so requirement codes are never reused
     requirement_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

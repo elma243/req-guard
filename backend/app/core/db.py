@@ -3,7 +3,8 @@
 import sqlite3
 from collections.abc import Generator
 
-from sqlalchemy import MetaData, create_engine, event
+from sqlalchemy import JSON, MetaData, create_engine, event
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -24,6 +25,11 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
+
+# Type of every JSON column: JSONB on PostgreSQL, plain JSON on SQLite (tests). PostgreSQL's json type has no
+# equality operator, so a query that compares whole rows (SELECT DISTINCT, GROUP BY, UNION) fails on it; jsonb
+# has one, and is also smaller and faster to read.
+JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 # Fixed constraint names, so migrations are the same on SQLite and PostgreSQL
 NAMING_CONVENTION = {

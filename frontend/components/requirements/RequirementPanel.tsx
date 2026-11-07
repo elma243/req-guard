@@ -4,7 +4,16 @@ import { ErrorBanner, secondaryButton } from "@/components/ui";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
-import { Confidence, ModelBadge, NFR_LABELS, ReviewBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
+import {
+  ChangeRequestBadge,
+  Confidence,
+  ModelBadge,
+  NFR_LABELS,
+  ReviewBadge,
+  SourceLine,
+  StatusBadge,
+  typeLabel,
+} from "./labels";
 
 // Loaded detail of the open requirement: { data } or { error }; null while loading
 export type DetailState = { data?: RequirementDetail; error?: string } | null;
@@ -17,6 +26,9 @@ export default function RequirementPanel({
   onRetry,
   onClose,
   actions,
+  busy = false,
+  onOpenRequirement,
+  onMergeInto,
 }: {
   requirement: Requirement;
   detail: DetailState;
@@ -26,6 +38,10 @@ export default function RequirementPanel({
   onRetry: () => void;
   onClose: () => void;
   actions?: React.ReactNode;
+  busy?: boolean;
+  onOpenRequirement?: (id: number) => void;
+  // Merge this requirement into another (from a possible-duplicate finding)
+  onMergeInto?: (id: number) => void;
 }) {
   const v = r.current;
   const mergedInto = r.merged_into_id ? codes.get(r.merged_into_id) : undefined;
@@ -73,6 +89,11 @@ export default function RequirementPanel({
               Merged into {mergedInto ?? "a requirement that no longer exists"}.
             </p>
           )}
+          {r.change_request_for && (
+            <p className="mt-3">
+              <ChangeRequestBadge requirement={r} />
+            </p>
+          )}
           {mergedHere.length > 0 && (
             <p className="mt-3 text-xs text-zinc-400">Merged here: {mergedHere.map((m) => m.code).join(", ")}</p>
           )}
@@ -82,7 +103,12 @@ export default function RequirementPanel({
           <div className="space-y-3">
             <QualitySummary requirement={r} />
             {detail?.data ? (
-              <FindingList detail={detail.data} />
+              <FindingList
+                detail={detail.data}
+                disabled={busy}
+                onOpen={onOpenRequirement}
+                onMergeInto={onMergeInto}
+              />
             ) : (
               <Loading detail={detail} what="findings" onRetry={onRetry} />
             )}

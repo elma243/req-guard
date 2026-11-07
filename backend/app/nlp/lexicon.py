@@ -101,6 +101,22 @@ LIMIT_WORDS = {
     "meyad", "shima", "sima", "sorbochcho", "sorbonimno",
 }  # fmt: skip
 
+# Non-functional requirements that are naturally measured (availability, capacity, speed, recovery). With one of
+# these words, or a LIMIT_WORDS word, a missing value matters in any category; without, a usability or security
+# feature such as "support a dark mode theme" is a yes / no feature (see check_missing_info)
+MEASURED_TOPIC_WORDS = {
+    # English
+    "uptime", "availability", "downtime", "capacity", "concurrent", "concurrently", "simultaneous", "throughput",
+    "latency", "response time", "respond", "responds", "response", "load", "loads", "loading", "speed", "fast",
+    "faster", "quick", "quickly", "slow", "performance", "scalable", "scale", "recover", "recovery", "backup",
+    "backups", "crash", "crashes", "error rate",
+    # Banglish
+    "taratari", "druto",
+}  # fmt: skip
+
+# Matched at the start of a word
+MEASURED_TOPIC_WORDS_BANGLA = {"দ্রুত", "তাড়াতাড়ি", "লোড", "আপটাইম", "ব্যাকআপ", "স্পিড"}  # fmt: skip
+
 # Matched at the start of a word
 LIMIT_WORDS_BANGLA = {
     "মেয়াদ", "সময়সীমা", "সীমা", "ডেডলাইন", "রিমাইন্ডার", "ব্যাকআপ", "টাইমআউট", "সর্বোচ্চ", "সর্বনিম্ন", "কোটা", "আপলোড", "সংযুক্তি",

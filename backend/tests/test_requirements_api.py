@@ -73,6 +73,7 @@ def test_extract_mixed_language_chat(client, owner, llm):
         "rule_based_batches": 0,
         "notice": None,
         "ai_error": None,
+        "similarity_unavailable_reason": None,
     }
     sent = llm.sentences_sent
     assert BANGLA_OTP in sent and BANGLISH_PDF in sent and "Kalke meeting ta 3 tay hobe?" in sent

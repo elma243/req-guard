@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.db import Base
+from app.core.db import Base, JsonType
 
 
 class Message(Base):
@@ -28,7 +28,7 @@ class Message(Base):
     author: Mapped[str] = mapped_column(String(200), default="")
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     text: Mapped[str] = mapped_column(Text)
-    raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # When requirement extraction last read this message (also set when it gave no requirements)
     requirements_extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

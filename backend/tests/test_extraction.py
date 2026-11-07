@@ -4,11 +4,12 @@ import itertools
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import event
 
 from app.ai import llm as llm_module
 from app.ai.llm import load_prompt
 from app.core.config import settings
-from app.models import Message, Project, Requirement, User
+from app.models import Message, Project, Requirement, RequirementSource, RequirementVersion, User
 from app.nlp import extraction
 from app.nlp.extraction import (
     MessageInput,
@@ -19,6 +20,7 @@ from app.nlp.extraction import (
     resolve_sentences,
     split_sentences,
 )
+from app.nlp.validate import validate_project
 from app.schemas.extraction import ExtractedRequirement, ExtractionAnswer
 from tests.fake_llm import FakeLLM
 
@@ -443,3 +445,115 @@ def test_per_run_limit(db, project, monkeypatch):
 
     assert (first.messages_processed, first.messages_remaining) == (2, 1)
     assert (second.messages_processed, second.messages_remaining) == (1, 0)
+
+
+# ---------- replacing untouched suggestions ----------
+
+
+def _requirement(project, number, sources, *, status="suggested", user_version=False, quality_failed=None):
+    """`sources`: (message, sentence) pairs."""
+    versions = [RequirementVersion(version=1, statement=f"Statement {number}", type="functional", actor="", origin="ai")]
+    if user_version:
+        versions.append(RequirementVersion(version=2, statement="Edited", type="functional", actor="", origin="user"))
+    return Requirement(
+        project_id=project.id,
+        number=number,
+        code=f"REQ-{number:03d}",
+        origin="ai",
+        status=status,
+        versions=versions,
+        sources=[RequirementSource(message_id=m.id, source_sentence=s) for m, s in sources],
+        # A filled JSON column: comparing it is what broke SELECT DISTINCT on PostgreSQL
+        quality_failed=quality_failed or [{"criterion": "verifiable", "points": 25, "reason": "No value."}],
+    )
+
+
+def test_delete_replaceable_removes_only_untouched_suggestions_from_those_messages(db, project):
+    first, second = add_messages(db, project, "Order list lagbe. CSV export lagbe.", "Report lagbe.")
+    db.add_all(
+        [
+            # Two sentences of the same message: a join gives this requirement twice
+            _requirement(project, 1, [(first, "Order list lagbe."), (first, "CSV export lagbe.")]),
+            _requirement(project, 2, [(first, "Order list lagbe."), (second, "Report lagbe.")]),  # another message too
+            _requirement(project, 3, [(first, "Order list lagbe.")], status="accepted"),
+            _requirement(project, 4, [(first, "Order list lagbe.")], user_version=True),
+            _requirement(project, 5, [(first, "CSV export lagbe.")]),  # a merge target below
+            _requirement(project, 6, [(second, "Report lagbe.")], status="merged"),
+        ]
+    )
+    db.commit()
+    merged = db.query(Requirement).filter_by(number=6).one()
+    merged.merged_into_id = db.query(Requirement).filter_by(number=5).one().id
+    db.commit()
+
+    extraction._delete_replaceable(db, project.id, {first.id})
+    db.commit()
+
+    assert sorted(r.code for r in db.query(Requirement).all()) == ["REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006"]
+
+
+def test_requirement_lookups_by_message_use_no_select_distinct(db, project):
+    """Regression: SELECT DISTINCT over requirements compares the json column quality_failed, which PostgreSQL
+    cannot do ("could not identify an equality operator for type json")."""
+    (message,) = add_messages(db, project, "Order list lagbe. CSV export lagbe.")
+    db.add(_requirement(project, 1, [(message, "Order list lagbe."), (message, "CSV export lagbe.")]))
+    db.commit()
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    event.listen(db.get_bind(), "before_cursor_execute", capture)
+    try:
+        kept = extraction._kept_sources(db, project.id, {message.id})
+        extraction._delete_replaceable(db, project.id, {message.id})
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", capture)
+
+    assert sum(kept.values()) == 1  # counted once, though it has two sentences of that message
+    assert statements and not any("DISTINCT" in s.upper() for s in statements)
+
+
+def test_force_rerun_after_validation_replaces_suggestions(db, project):
+    add_messages(db, project, CSV, "Report lagbe.")
+    extract_requirements(db, project, None)
+    validate_project(db, project)  # fills quality_failed
+    db.commit()
+
+    again = extract_requirements(db, project, None, force=True)
+
+    assert again.requirements_created == 2
+    assert [r.code for r in db.query(Requirement).order_by(Requirement.number)] == ["REQ-003", "REQ-004"]
+
+
+# ---------- what the client does NOT want ----------
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Dark mode lagbe na.",
+        "SMS notification chai na.",
+        "Dark mode er dorkar nai.",
+        "ডার্ক মোড দরকার নেই।",
+        "প্রিন্ট করার প্রয়োজন নেই।",
+        "We don't need a dark mode.",
+        "No need for SMS alerts.",
+    ],
+)
+def test_negative_requests_are_kept_by_the_rules(db, project, sentence):
+    """A "not needed" is a requirement: without it a conflict with an earlier request cannot be found."""
+    add_messages(db, project, sentence)
+
+    result = extract_requirements(db, project, None)
+
+    assert result.requirements_created == 1
+    (requirement,) = db.query(Requirement).all()
+    assert requirement.current.statement == sentence
+    assert requirement.sources[0].source_sentence == sentence
+
+
+def test_the_prompt_asks_for_negative_requirements():
+    prompt = load_prompt("extract_requirements")
+    assert "The system shall not" in prompt
+    assert all(word in prompt for word in ("lagbe na", "chai na", "দরকার নেই"))

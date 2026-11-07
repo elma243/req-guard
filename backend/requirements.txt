@@ -1,3 +1,7 @@
+# CPU-only PyTorch: this index has the "+cpu" builds, which pip prefers over PyPI's CUDA build
+# (on Linux that would also pull ~2.5 GB of nvidia-* packages)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # Web framework and server
 fastapi>=0.115
 uvicorn[standard]>=0.30
@@ -33,3 +37,11 @@ spacy>=3.7,<4
 
 # TF-IDF + LogisticRegression baseline classifier (evaluation)
 scikit-learn>=1.4
+
+# Similarity checks (Step 7b): sentence embeddings (all-MiniLM-L6-v2) and NLI contradiction
+# (cross-encoder/nli-deberta-v3-small). Models download on first use (~670 MB) into the Hugging Face cache.
+torch>=2.4
+sentence-transformers>=6.0
+
+# pgvector column type for SQLAlchemy (embeddings on PostgreSQL)
+pgvector>=0.5

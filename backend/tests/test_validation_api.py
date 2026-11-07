@@ -100,12 +100,16 @@ def test_extraction_validates_every_new_requirement(client, extracted):
     assert all(r["quality_score"] is not None for r in items.values())
     otp = detail(client, extracted, "REQ-001")
     [finding] = otp["findings"]
-    assert (finding["category"], finding["rule"], finding["severity"]) == ("missing_info", "no_measurable_value", "high")
+    # An OTP is a yes / no security feature: a low note, not a missing measurable value
+    assert (finding["category"], finding["rule"], finding["severity"]) == ("missing_info", "add_acceptance_criteria", "low")
     assert (finding["origin"], finding["status"], finding["version"]) == ("ai", "suggested", 1)
     assert finding["evidence"] == BANGLA_OTP  # the client's sentence, unchanged
     assert otp["has_issues"] and otp["open_findings"] == 1
-    assert [f["criterion"] for f in otp["quality_failed"]] == ["verifiable"]
-    assert otp["quality_score"] == round(100 * 50 / 75)  # no modules or scope, and no actor check for non-functional
+    assert otp["quality_failed"] == []
+    assert otp["quality_score"] == 100  # no modules or scope, and no actor check for non-functional
+
+    load = items["REQ-003"]  # "load the app within 2 seconds": measured, and it has its value
+    assert (load["current"]["nfr_category"], load["open_findings"]) == ("performance", 0)
 
     pdf = items["REQ-002"]
     assert (pdf["quality_score"], pdf["open_findings"], pdf["has_issues"]) == (100, 0, False)
@@ -190,9 +194,13 @@ def test_a_person_rewriting_the_statement_clears_the_clients_vague_word(client, 
 
 
 def test_changing_the_type_changes_what_is_checked(client, extracted):
-    updated = edit(client, extracted, "REQ-002", type="non_functional")
+    updated = edit(client, extracted, "REQ-002", type="non_functional")  # category "other": a yes / no feature
 
-    assert [f["rule"] for f in updated["findings"]] == ["no_measurable_value"]
+    assert [f["rule"] for f in updated["findings"]] == ["add_acceptance_criteria"]
+
+    updated = edit(client, extracted, "REQ-002", nfr_category="performance")  # performance is always measured
+
+    assert [(f["rule"], f["severity"]) for f in updated["findings"]] == [("no_measurable_value", "high")]
 
 
 def test_a_failed_edit_stores_nothing(client, extracted):
@@ -203,7 +211,7 @@ def test_a_failed_edit_stores_nothing(client, extracted):
     res = client.patch(f"{base}/requirements/{rid}", json={"statement": "Fast."}, headers=headers)
 
     assert res.status_code == 409
-    assert [f["rule"] for f in detail(client, extracted, "REQ-001")["findings"]] == ["no_measurable_value"]
+    assert [f["rule"] for f in detail(client, extracted, "REQ-001")["findings"]] == ["add_acceptance_criteria"]
 
 
 # ---------- Validate button ----------
@@ -242,7 +250,12 @@ def test_validate_counts_issues(client, extracted):
 
 
 def test_validate_with_no_requirements(client, owner):
-    assert validate(client, owner) == {"validated": 0, "with_issues": 0, "findings": 0}
+    assert validate(client, owner) == {
+        "validated": 0,
+        "with_issues": 0,
+        "findings": 0,
+        "similarity_unavailable_reason": None,
+    }
 
 
 def test_validate_gives_a_score_to_requirements_from_before_this_step(client, extracted, db_session_factory):
