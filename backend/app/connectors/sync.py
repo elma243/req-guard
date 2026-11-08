@@ -23,6 +23,8 @@ from app.models.source import SYNC_ERROR, SYNC_NEEDS_AUTH, SYNC_OK
 logger = logging.getLogger(__name__)
 
 LOCK_TIMEOUT = timedelta(minutes=15)
+# Failed syncs in a row after which auto-sync pauses (until a sync succeeds or auto-sync is turned on again)
+MAX_FAILURES = 3
 UNEXPECTED_ERROR = "Unexpected error while syncing. See the backend log."
 
 # Why a sync failed, for the HTTP status of the Sync button
@@ -72,11 +74,20 @@ def acquire_lock(db: Session, source_id: int, now: datetime) -> bool:
 
 
 def _failed(db: Session, source: Source, sync_status: str, message: str, reason: str) -> SyncOutcome:
-    """Store the failure on the source, so its card shows it."""
+    """Store the failure on the source, so its card shows it.
+
+    An error counts towards the pause after MAX_FAILURES. Needing the Google account connected again does not:
+    auto-sync stops for that source anyway until the account is connected again.
+    """
     source.sync_status = sync_status
     source.sync_error = message
     if sync_status == SYNC_NEEDS_AUTH:
         source.credentials_encrypted = None  # revoked/expired or unreadable: connect again
+    else:
+        source.failure_count = (source.failure_count or 0) + 1
+        if source.failure_count >= MAX_FAILURES and source.auto_sync:
+            source.auto_sync_paused = True
+            logger.warning("auto-sync of source %s paused after %d failed syncs", source.id, source.failure_count)
     db.commit()
     return SyncOutcome(status=sync_status, error=message, reason=reason)
 
@@ -101,6 +112,8 @@ def _fetch_and_store(db: Session, source: Source) -> SyncOutcome:
     source.config = {**(source.config or {}), "state": connector.state}
     source.sync_status = SYNC_OK
     source.sync_error = None
+    source.failure_count = 0
+    source.auto_sync_paused = False  # a successful sync (e.g. the Retry button) ends a pause
     db.commit()
     return SyncOutcome(
         status=SYNC_OK, imported=counts.imported, duplicates=counts.duplicates, new_message_ids=counts.new_ids

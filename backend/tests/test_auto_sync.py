@@ -8,14 +8,17 @@ raises a given error.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.api import sources as sources_api
 from app.connectors import sync
 from app.connectors.scheduler import AutoSyncScheduler, spread_offset
 from app.connectors.base import NormalizedMessage
-from app.connectors.http import ConnectorError
+from app.connectors.http import ConnectorError, NeedsAuthError
 from app.core.config import settings
+from app.core.security import create_oauth_state
 from app.models import Message, Project, Source, User
 
 T0 = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
@@ -303,3 +306,95 @@ def test_scheduler_started_and_stopped_with_the_app(monkeypatch):
         task = main_module.app.state.auto_sync_task
         assert task is not None and not task.done()
     assert task.cancelled() or task.done()
+
+
+# ---------- pause after errors ----------
+
+
+def test_three_failures_in_a_row_pause_auto_sync(db, project, script, scheduler, clock):
+    source = add_source(db, project, auto_sync=True, sync_interval_minutes=1, next_sync_at=T0)
+    script.then(ConnectorError("down"), ConnectorError("down"), ConnectorError("still down"))
+    for _ in range(3):
+        assert scheduler.tick() == 1
+        clock.advance(minutes=1)
+    source = reload(db, source)
+    assert source.failure_count == 3 and source.auto_sync_paused
+    assert source.sync_error == "still down"
+
+    clock.advance(hours=1)
+    assert scheduler.tick() == 0  # paused sources are left alone
+    assert script.calls == 3
+
+
+def test_a_success_resets_the_failure_count(db, project, script, scheduler, clock):
+    source = add_source(db, project, auto_sync=True, sync_interval_minutes=1, next_sync_at=T0)
+    script.then(ConnectorError("down"), ConnectorError("down"), [msg("1")], ConnectorError("down"))
+    for _ in range(4):
+        scheduler.tick()
+        clock.advance(minutes=1)
+    source = reload(db, source)
+    assert source.failure_count == 1 and not source.auto_sync_paused
+
+
+def test_retry_with_a_successful_sync_ends_the_pause(db, project, script, scheduler, clock):
+    source = add_source(db, project, auto_sync=True, failure_count=3, auto_sync_paused=True, sync_status="error")
+    script.then([msg("1")])
+    assert sync.run_sync(db, source, T0).status == "ok"  # what the Retry button does
+    source = reload(db, source)
+    assert source.failure_count == 0 and not source.auto_sync_paused and source.sync_error is None
+
+
+def test_failures_without_auto_sync_do_not_pause(db, project, script):
+    source = add_source(db, project, auto_sync=False)
+    script.then(*(ConnectorError("down") for _ in range(3)))
+    for _ in range(3):
+        sync.run_sync(db, source, T0)
+    source = reload(db, source)
+    assert source.failure_count == 3 and not source.auto_sync_paused
+
+
+# ---------- Gmail: expired refresh token ----------
+
+
+def gmail_source(db, project, **fields):
+    return add_source(
+        db, project, type_="gmail", auto_sync=True, next_sync_at=T0, credentials_encrypted="encrypted-token", **fields
+    )
+
+
+def test_expired_google_token_stops_auto_sync(db, project, script, scheduler, clock):
+    source = gmail_source(db, project)
+    script.then(NeedsAuthError("Google access expired or was revoked. Connect the Google account again."))
+    assert scheduler.tick() == 1
+    source = reload(db, source)
+    assert source.sync_status == "needs_auth"
+    assert source.credentials_encrypted is None
+    assert source.failure_count == 0 and not source.auto_sync_paused  # not an "error" pause
+    assert source.auto_sync  # the setting is kept for when the account is connected again
+
+    clock.advance(hours=2)
+    assert scheduler.tick() == 0
+    assert script.calls == 1
+
+
+def test_gmail_without_an_account_is_not_auto_synced(db, project, script, scheduler):
+    add_source(db, project, type_="gmail", auto_sync=True, next_sync_at=T0)
+    assert scheduler.tick() == 0
+
+
+def test_reconnecting_google_starts_auto_sync_again(client, db, project, script, scheduler, clock, monkeypatch):
+    source = gmail_source(db, project, sync_status="needs_auth", failure_count=2)
+    source.credentials_encrypted = None
+    db.commit()
+    monkeypatch.setattr(settings, "token_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(sources_api, "exchange_code", lambda code, **kwargs: "1//new-refresh-token")
+
+    state = create_oauth_state(project.owner_id, source.id)
+    res = client.get("/oauth/gmail/callback", params={"state": state, "code": "ok"}, follow_redirects=False)
+    assert res.status_code == 303 and res.headers["location"].endswith("gmail=connected")
+
+    source = reload(db, source)
+    assert source.sync_status is None and source.failure_count == 0 and source.credentials_encrypted
+    assert source.next_sync_at is not None
+    clock.now = sync.as_utc(source.next_sync_at)
+    assert scheduler.tick() == 1

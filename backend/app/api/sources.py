@@ -26,6 +26,7 @@ from app.connectors.registry import (
     not_configured_message,
     validate_settings,
 )
+from app.connectors.scheduler import schedule_first_run
 from app.core.config import settings
 from app.core.crypto import EncryptionKeyError, encrypt
 from app.core.security import InvalidTokenError, create_oauth_state, decode_oauth_state
@@ -253,6 +254,10 @@ def gmail_callback(db: DbSession, state: str = "", code: str = "", error: str = 
 
     source.sync_status = None
     source.sync_error = None
+    # A connected account starts auto-sync again (it stops while the account needs connecting)
+    source.failure_count = 0
+    source.auto_sync_paused = False
+    schedule_first_run(source, sync.utcnow())
     db.commit()
     return back("connected")
 
