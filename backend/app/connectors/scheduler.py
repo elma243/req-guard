@@ -150,7 +150,10 @@ class AutoSyncScheduler:
             db.execute(
                 update(Project)
                 .where(Project.id == project_id)
-                .values(unseen_auto_messages=Project.unseen_auto_messages + len(new_ids))
+                .values(
+                    unseen_auto_messages=Project.unseen_auto_messages + len(new_ids),
+                    updated_at=Project.updated_at,  # not an edit of the project
+                )
                 .execution_options(synchronize_session=False)
             )
             db.commit()

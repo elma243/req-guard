@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
@@ -44,6 +44,27 @@ class SourceOut(BaseModel):
     message_count: int = 0
     # API sources only: true while a Gmail source has no connected Google account
     needs_auth: bool = False
+    # Automatic sync (API sources only)
+    auto_sync: bool = False
+    sync_interval_minutes: int = 5
+    next_sync_at: UtcDatetime | None = None
+    failure_count: int = 0
+    auto_sync_paused: bool = False
+    # A sync (manual or automatic) is running right now
+    syncing: bool = False
+    # False when the server runs without the scheduler (AUTO_SYNC_ENABLED=false)
+    auto_sync_available: bool = True
+
+
+class AutoSyncUpdate(BaseModel):
+    """Only the fields that are sent are changed."""
+
+    enabled: bool | None = None
+    interval_minutes: Literal[1, 5, 15, 60] | None = None
+
+
+class UnseenMessages(BaseModel):
+    count: int
 
 
 class ConnectorOut(BaseModel):

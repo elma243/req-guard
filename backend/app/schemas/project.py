@@ -36,6 +36,8 @@ class ProjectUpdate(BaseModel):
     description: LongText | None = None
     scope_text: LongText | None = None
     modules: ModuleList | None = None
+    # Extract requirements from messages that auto-sync brings in, right after the sync
+    auto_extract: bool | None = None
 
 
 class ProjectOut(BaseModel):
@@ -46,6 +48,7 @@ class ProjectOut(BaseModel):
     description: str
     scope_text: str
     modules: list[ProjectModule]
+    auto_extract: bool = False
     owner_id: int
     created_at: datetime
     updated_at: datetime

@@ -4,11 +4,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.api.deps import DbSession, OwnedProject
-from app.models import Message
-from app.schemas.message import MessageOut, MessagePage
+from app.models import Message, Project
+from app.schemas.message import MessageOut, MessagePage, UnseenMessages
 
 router = APIRouter(prefix="/projects/{project_id}/messages", tags=["messages"])
 
@@ -58,6 +58,26 @@ def list_messages(
     return MessagePage(
         items=[MessageOut.model_validate(m) for m in rows], total=total, page=page, page_size=page_size
     )
+
+
+@router.get("/unseen", response_model=UnseenMessages)
+def unseen_messages(project: OwnedProject) -> UnseenMessages:
+    """How many messages auto-sync imported since the Messages page was last opened (the menu badge)."""
+    return UnseenMessages(count=project.unseen_auto_messages)
+
+
+@router.post("/seen", response_model=UnseenMessages)
+def mark_messages_seen(project: OwnedProject, db: DbSession) -> UnseenMessages:
+    """The Messages page was opened: clear the badge."""
+    db.execute(
+        update(Project)
+        .where(Project.id == project.id)
+        # A badge change is not an edit of the project, so updated_at stays as it was
+        .values(unseen_auto_messages=0, updated_at=Project.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return UnseenMessages(count=0)
 
 
 @router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)

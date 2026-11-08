@@ -459,3 +459,125 @@ def test_failed_auto_extract_keeps_the_sync(db, project, script, scheduler, monk
     source = reload(db, source)
     assert source.sync_status == "ok" and source.failure_count == 0
     assert db.scalar(select(Message)).requirements_extracted_at is None
+
+
+# ---------- API ----------
+
+
+@pytest.fixture
+def api_owner(client, make_user, monkeypatch):
+    monkeypatch.setattr(settings, "slack_bot_token", "xoxb-test")
+    monkeypatch.setattr(settings, "telegram_bot_token", "123:test")
+    _, headers = make_user()
+    project_id = client.post("/projects", json={"name": "Acme"}, headers=headers).json()["id"]
+    return headers, project_id
+
+
+def create_api_source(client, headers, project_id, type_="slack"):
+    settings_by_type = {"slack": {"channels": ["client-acme"]}, "telegram": {}}
+    res = client.post(
+        f"/projects/{project_id}/sources",
+        json={"type": type_, "display_name": f"Acme {type_}", "settings": settings_by_type[type_]},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def test_telegram_auto_syncs_by_default_others_do_not(client, api_owner):
+    headers, project_id = api_owner
+    telegram = create_api_source(client, headers, project_id, "telegram")
+    slack = create_api_source(client, headers, project_id, "slack")
+    assert telegram["auto_sync"] is True and telegram["sync_interval_minutes"] == 5
+    assert slack["auto_sync"] is False
+    assert slack["auto_sync_paused"] is False and slack["syncing"] is False
+    assert slack["auto_sync_available"] is False  # tests run with AUTO_SYNC_ENABLED=false
+
+
+def test_turn_auto_sync_on_and_change_the_interval(client, api_owner):
+    headers, project_id = api_owner
+    source = create_api_source(client, headers, project_id)
+    url = f"/projects/{project_id}/sources/{source['id']}/auto-sync"
+
+    res = client.patch(url, json={"enabled": True, "interval_minutes": 15}, headers=headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["auto_sync"] is True and body["sync_interval_minutes"] == 15
+    assert body["next_sync_at"] is not None
+
+    assert client.patch(url, json={"interval_minutes": 7}, headers=headers).status_code == 422
+    assert client.patch(url, json={"enabled": False}, headers=headers).json()["auto_sync"] is False
+
+
+def test_turning_auto_sync_on_again_ends_a_pause(client, api_owner, db_session_factory):
+    headers, project_id = api_owner
+    source = create_api_source(client, headers, project_id)
+    with db_session_factory() as db:
+        row = db.get(Source, source["id"])
+        row.auto_sync, row.auto_sync_paused, row.failure_count = True, True, 3
+        db.commit()
+    url = f"/projects/{project_id}/sources/{source['id']}/auto-sync"
+    listed = client.get(f"/projects/{project_id}/sources", headers=headers).json()[0]
+    assert listed["auto_sync_paused"] is True and listed["failure_count"] == 3
+
+    body = client.patch(url, json={"enabled": True}, headers=headers).json()
+    assert body["auto_sync_paused"] is False and body["failure_count"] == 0
+
+
+def test_auto_sync_settings_only_for_api_sources_of_own_project(client, api_owner, make_user, db_session_factory):
+    headers, project_id = api_owner
+    upload = client.post(
+        f"/projects/{project_id}/uploads",
+        files=[("files", ("chat.txt", b"20/10/26, 10:05 - Karim: Order list lagbe.\n", "text/plain"))],
+        headers=headers,
+    )
+    assert upload.status_code == 200, upload.text
+    upload_source = client.get(f"/projects/{project_id}/sources", headers=headers).json()[0]
+    res = client.patch(
+        f"/projects/{project_id}/sources/{upload_source['id']}/auto-sync", json={"enabled": True}, headers=headers
+    )
+    assert res.status_code == 400
+
+    source = create_api_source(client, headers, project_id)
+    _, other_headers = make_user()
+    res = client.patch(
+        f"/projects/{project_id}/sources/{source['id']}/auto-sync", json={"enabled": True}, headers=other_headers
+    )
+    assert res.status_code == 404
+
+
+def test_listed_source_shows_a_running_sync(client, api_owner, db_session_factory):
+    headers, project_id = api_owner
+    source = create_api_source(client, headers, project_id)
+    with db_session_factory() as db:
+        sync.acquire_lock(db, source["id"], sync.utcnow())
+    assert client.get(f"/projects/{project_id}/sources", headers=headers).json()[0]["syncing"] is True
+
+
+def test_project_auto_extract_setting(client, api_owner):
+    headers, project_id = api_owner
+    assert client.get(f"/projects/{project_id}", headers=headers).json()["auto_extract"] is False
+    res = client.patch(f"/projects/{project_id}", json={"auto_extract": True}, headers=headers)
+    assert res.status_code == 200 and res.json()["auto_extract"] is True
+
+
+def test_new_messages_badge(client, api_owner, db_session_factory, script, clock):
+    headers, project_id = api_owner
+    source = create_api_source(client, headers, project_id)
+    url = f"/projects/{project_id}/messages"
+    assert client.get(f"{url}/unseen", headers=headers).json() == {"count": 0}
+
+    # A manual sync does not raise the count: the user just saw its result
+    script.then([msg("1")], [msg("2"), msg("3")])
+    assert client.post(f"/projects/{project_id}/sources/{source['id']}/sync", headers=headers).status_code == 200
+    assert client.get(f"{url}/unseen", headers=headers).json() == {"count": 0}
+
+    with db_session_factory() as db:
+        row = db.get(Source, source["id"])
+        row.auto_sync, row.next_sync_at = True, T0
+        db.commit()
+    AutoSyncScheduler(db_session_factory, clock, llm_factory=lambda: None).tick()
+    assert client.get(f"{url}/unseen", headers=headers).json() == {"count": 2}
+
+    assert client.post(f"{url}/seen", headers=headers).json() == {"count": 0}
+    assert client.get(f"{url}/unseen", headers=headers).json() == {"count": 0}

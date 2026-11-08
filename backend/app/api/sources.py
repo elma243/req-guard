@@ -18,6 +18,7 @@ from app.connectors import sync
 from app.connectors.files import SUPPORTED_EXTENSIONS, connector_for_upload
 from app.connectors.gmail import GmailConnector, authorize_url, exchange_code
 from app.connectors.http import ConnectorError
+from app.connectors.telegram import TelegramConnector
 from app.connectors.importer import get_or_create_source, import_messages
 from app.connectors.registry import (
     API_CONNECTORS,
@@ -34,6 +35,7 @@ from app.models import Message, Project, Source
 from app.models.source import SYNC_NEEDS_AUTH, SYNC_OK
 from app.schemas.message import (
     AuthorizeUrl,
+    AutoSyncUpdate,
     ConnectorOut,
     FileImportResult,
     SourceCreate,
@@ -50,6 +52,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["sources"])
 public_router = APIRouter(tags=["sources"])
 
 GMAIL = GmailConnector.source
+TELEGRAM = TelegramConnector.source
 
 MAX_FILES = 10
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -72,7 +75,12 @@ def list_sources(project: OwnedProject, db: DbSession) -> list[SourceOut]:
 
 def _source_out(source: Source, message_count: int) -> SourceOut:
     return SourceOut.model_validate(source).model_copy(
-        update={"message_count": message_count, "needs_auth": needs_auth(source)}
+        update={
+            "message_count": message_count,
+            "needs_auth": needs_auth(source),
+            "syncing": sync.is_locked(source, sync.utcnow()),
+            "auto_sync_available": settings.auto_sync_enabled,
+        }
     )
 
 
@@ -148,6 +156,8 @@ def create_source(body: SourceCreate, project: OwnedProject, db: DbSession) -> S
         display_name=body.display_name,
         config={"origin": "api", "settings": user_settings, "state": {}},
         sync_status=SYNC_NEEDS_AUTH if body.type == GMAIL else None,
+        # Telegram keeps updates for about 24 hours only, so its messages are fetched automatically by default
+        auto_sync=body.type == TELEGRAM,
     )
     db.add(source)
     db.commit()
@@ -183,6 +193,28 @@ def sync_source(source_id: int, project: OwnedProject, db: DbSession) -> SyncRes
         sync_status=SYNC_OK,
         last_synced_at=source.last_synced_at,
     )
+
+
+@router.patch("/sources/{source_id}/auto-sync", response_model=SourceOut)
+def update_auto_sync(source_id: int, body: AutoSyncUpdate, project: OwnedProject, db: DbSession) -> SourceOut:
+    """Turn auto-sync on or off and choose its interval (1, 5, 15 or 60 minutes).
+
+    Turning it on or changing the interval also ends a pause after errors and schedules the next run.
+    """
+    source = _get_api_source(db, project, source_id)
+    restart = False
+    if body.enabled is not None:
+        restart = body.enabled and (not source.auto_sync or source.auto_sync_paused)
+        source.auto_sync = body.enabled
+    if body.interval_minutes is not None and body.interval_minutes != source.sync_interval_minutes:
+        source.sync_interval_minutes = body.interval_minutes
+        restart = True
+    if restart:
+        source.failure_count = 0
+        source.auto_sync_paused = False
+        schedule_first_run(source, sync.utcnow())
+    db.commit()
+    return _source_out(source, _message_count(db, source))
 
 
 @router.get("/sources/{source_id}/status", response_model=SourceStatus)
