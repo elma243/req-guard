@@ -10,16 +10,19 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 import app.main as main_module
 from app.api import sources as sources_api
+from app.connectors import scheduler as scheduler_module
 from app.connectors import sync
 from app.connectors.scheduler import AutoSyncScheduler, spread_offset
 from app.connectors.base import NormalizedMessage
 from app.connectors.http import ConnectorError, NeedsAuthError
+from app.connectors.importer import import_messages
 from app.core.config import settings
 from app.core.security import create_oauth_state
-from app.models import Message, Project, Source, User
+from app.models import Message, Project, Requirement, Source, User
 
 T0 = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
 
@@ -202,7 +205,8 @@ def clock():
 
 @pytest.fixture
 def scheduler(db_session_factory, clock):
-    return AutoSyncScheduler(db_session_factory, clock)
+    # No LLM: backend/.env may hold a real key; auto-extract then uses the rule-based fallback
+    return AutoSyncScheduler(db_session_factory, clock, llm_factory=lambda: None)
 
 
 def reload(db, source: Source) -> Source:
@@ -256,7 +260,7 @@ def test_run_is_skipped_while_the_previous_sync_is_still_going(db, project, scri
 def test_at_most_max_per_tick_sources_per_tick(db, project, script, db_session_factory, clock):
     for n in range(4):
         add_source(db, project, name=f"s{n}", auto_sync=True, next_sync_at=T0 - timedelta(minutes=n))
-    scheduler = AutoSyncScheduler(db_session_factory, clock, max_per_tick=3)
+    scheduler = AutoSyncScheduler(db_session_factory, clock, max_per_tick=3, llm_factory=lambda: None)
     assert scheduler.tick() == 3
     assert scheduler.tick() == 1
 
@@ -398,3 +402,60 @@ def test_reconnecting_google_starts_auto_sync_again(client, db, project, script,
     assert source.next_sync_at is not None
     clock.now = sync.as_utc(source.next_sync_at)
     assert scheduler.tick() == 1
+
+
+# ---------- auto-extract ----------
+
+
+def requirement_message_ids(db, project) -> set[int]:
+    return {
+        s.message_id
+        for r in db.scalars(select(Requirement).where(Requirement.project_id == project.id))
+        for s in r.sources
+    }
+
+
+def test_auto_extract_reads_only_the_new_messages(db, project, script, scheduler):
+    project.auto_extract = True
+    source = add_source(db, project, auto_sync=True, next_sync_at=T0)
+    # Imported earlier (e.g. an upload) and not extracted yet: auto-extract leaves it for the Extract button
+    import_messages(db, project.id, None, [msg("old", "The report must be exported as PDF.", source="whatsapp")])
+    db.commit()
+    old = db.scalar(select(Message).where(Message.external_id == "old"))
+
+    script.then([msg("new", "The dashboard must show the order list.")])
+    assert scheduler.tick() == 1
+
+    db.expire_all()
+    new = db.scalar(select(Message).where(Message.external_id == "new"))
+    assert new.source_id == source.id and new.requirements_extracted_at is not None
+    assert db.get(Message, old.id).requirements_extracted_at is None
+    assert requirement_message_ids(db, project) == {new.id}
+    requirement = db.scalar(select(Requirement).where(Requirement.project_id == project.id))
+    assert requirement.origin == "ai" and requirement.status == "suggested"
+    assert requirement.quality_score is not None  # validated too
+
+
+def test_no_extraction_when_auto_extract_is_off(db, project, script, scheduler):
+    add_source(db, project, auto_sync=True, next_sync_at=T0)
+    script.then([msg("new")])
+    assert scheduler.tick() == 1
+    db.expire_all()
+    assert db.scalar(select(Message)).requirements_extracted_at is None
+    assert requirement_message_ids(db, project) == set()
+
+
+def test_failed_auto_extract_keeps_the_sync(db, project, script, scheduler, monkeypatch):
+    project.auto_extract = True
+    source = add_source(db, project, auto_sync=True, next_sync_at=T0)
+    db.commit()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("spaCy model missing")
+
+    monkeypatch.setattr(scheduler_module, "extract_requirements", broken)
+    script.then([msg("new")])
+    assert scheduler.tick() == 1
+    source = reload(db, source)
+    assert source.sync_status == "ok" and source.failure_count == 0
+    assert db.scalar(select(Message)).requirements_extracted_at is None

@@ -7,6 +7,8 @@ source from running together; a run that finds the lock taken is skipped.
 
 New sources are spread over their interval by id, so they do not all start at once. Paused sources (after
 MAX_FAILURES failed runs in a row) and Gmail sources that need the Google account connected again are left alone.
+When the project has auto-extract on, requirements are extracted and validated from the newly imported messages
+only, right after their sync.
 
 The scheduler has no cross-process coordination beyond the lock, so the backend must run as ONE worker.
 AUTO_SYNC_ENABLED=false turns it off (tests, deploys with several workers).
@@ -22,12 +24,15 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.ai.llm import LLMClient, LLMNotConfiguredError, get_llm
 from app.connectors import sync
 from app.connectors.base import as_utc
 from app.connectors.registry import API_CONNECTORS, needs_auth
 from app.core.db import SessionLocal
 from app.models import Project, Source
 from app.models.source import SYNC_NEEDS_AUTH
+from app.nlp.extraction import extract_requirements
+from app.nlp.validate import validate_project
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,15 @@ TICK_SECONDS = 15
 MAX_PER_TICK = 5
 # Sources are spread over their interval in steps of this many seconds, by id
 SPREAD_STEP_SECONDS = 37
+NO_LLM_CONFIGURED = "No AI model is configured; requirements were extracted with the rule-based fallback."
+
+
+def optional_llm() -> LLMClient | None:
+    """The configured LLM client, or None (rule-based extraction) when no provider is set up."""
+    try:
+        return get_llm()
+    except LLMNotConfiguredError:
+        return None
 
 
 def spread_offset(source_id: int, interval_minutes: int) -> timedelta:
@@ -66,9 +80,11 @@ class AutoSyncScheduler:
         *,
         tick_seconds: float = TICK_SECONDS,
         max_per_tick: int = MAX_PER_TICK,
+        llm_factory: Callable[[], LLMClient | None] = optional_llm,
     ):
         self.session_factory = session_factory
         self.clock = clock
+        self.llm_factory = llm_factory
         self.tick_seconds = tick_seconds
         self.max_per_tick = max_per_tick
 
@@ -138,7 +154,39 @@ class AutoSyncScheduler:
                 .execution_options(synchronize_session=False)
             )
             db.commit()
+            self._auto_extract(db, project_id, new_ids)
         return True
+
+    def _auto_extract(self, db: Session, project_id: int, message_ids: list[int]) -> None:
+        """Extract and validate requirements from the new messages only, if the project asks for it.
+
+        Runs after the source's lock is released. A failure is logged and does not count as a failed sync;
+        the messages stay unread for the Extract button.
+        """
+        project = db.get(Project, project_id)
+        if project is None or not project.auto_extract:
+            return
+        try:
+            llm = self.llm_factory()
+            result = extract_requirements(
+                db,
+                project,
+                llm,
+                only_message_ids=message_ids,
+                llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
+            )
+            validate_project(db, project, only_new=True, llm=llm)
+            db.commit()
+            logger.info(
+                "auto-extract project=%d messages=%d requirements=%d remaining=%d",
+                project_id,
+                result.messages_processed,
+                result.requirements_created,
+                result.messages_remaining,
+            )
+        except Exception:
+            logger.exception("auto-extract project=%d failed", project_id)
+            db.rollback()
 
     @staticmethod
     def _set_next_run(db: Session, source_id: int, when: datetime) -> None:
