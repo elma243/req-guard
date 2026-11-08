@@ -23,6 +23,9 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert any(c["name"] == "ck_team_members_role" for c in checks)
     source_columns = {c["name"] for c in inspect(engine).get_columns("sources")}
     assert {"credentials_encrypted", "sync_status", "sync_error"} <= source_columns
+    assert {"auto_sync", "sync_interval_minutes", "next_sync_at", "sync_started_at", "failure_count"} <= source_columns
+    assert "ck_sources_sync_interval_minutes" in {c["name"] for c in inspect(engine).get_check_constraints("sources")}
+    assert {"auto_extract", "unseen_auto_messages"} <= {c["name"] for c in inspect(engine).get_columns("projects")}
     assert {"requirements", "requirement_versions", "requirement_sources"} <= set(inspect(engine).get_table_names())
     assert "requirements_extracted_at" in {c["name"] for c in inspect(engine).get_columns("messages")}
     assert {"requirement_counter", "modules"} <= {c["name"] for c in inspect(engine).get_columns("projects")}

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base, JsonType
@@ -19,6 +19,10 @@ class Project(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     # Last REQ-number handed out; only grows, so requirement codes are never reused
     requirement_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Extract and validate requirements from messages that auto-sync brings in, right after the sync
+    auto_extract: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Messages auto-sync imported since the owner last opened the Messages page (the menu badge)
+    unseen_auto_messages: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -6,7 +6,7 @@ encrypted on the Source (Gmail); no endpoint ever returns them.
 
 import logging
 from pathlib import PurePath
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import RedirectResponse
@@ -14,26 +14,28 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 
 from app.api.deps import CurrentUser, DbSession, OwnedProject
-from app.connectors.base import as_utc
+from app.connectors import sync
 from app.connectors.files import SUPPORTED_EXTENSIONS, connector_for_upload
 from app.connectors.gmail import GmailConnector, authorize_url, exchange_code
-from app.connectors.http import ConnectorError, NeedsAuthError, NotConfiguredError
+from app.connectors.http import ConnectorError
+from app.connectors.telegram import TelegramConnector
 from app.connectors.importer import get_or_create_source, import_messages
 from app.connectors.registry import (
     API_CONNECTORS,
-    build_connector,
     missing_env,
     needs_auth,
     not_configured_message,
     validate_settings,
 )
+from app.connectors.scheduler import schedule_first_run
 from app.core.config import settings
-from app.core.crypto import DecryptionError, EncryptionKeyError, encrypt
+from app.core.crypto import EncryptionKeyError, encrypt
 from app.core.security import InvalidTokenError, create_oauth_state, decode_oauth_state
 from app.models import Message, Project, Source
-from app.models.source import SYNC_ERROR, SYNC_NEEDS_AUTH, SYNC_OK
+from app.models.source import SYNC_NEEDS_AUTH, SYNC_OK
 from app.schemas.message import (
     AuthorizeUrl,
+    AutoSyncUpdate,
     ConnectorOut,
     FileImportResult,
     SourceCreate,
@@ -50,6 +52,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["sources"])
 public_router = APIRouter(tags=["sources"])
 
 GMAIL = GmailConnector.source
+TELEGRAM = TelegramConnector.source
 
 MAX_FILES = 10
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -72,7 +75,12 @@ def list_sources(project: OwnedProject, db: DbSession) -> list[SourceOut]:
 
 def _source_out(source: Source, message_count: int) -> SourceOut:
     return SourceOut.model_validate(source).model_copy(
-        update={"message_count": message_count, "needs_auth": needs_auth(source)}
+        update={
+            "message_count": message_count,
+            "needs_auth": needs_auth(source),
+            "syncing": sync.is_locked(source, sync.utcnow()),
+            "auto_sync_available": settings.auto_sync_enabled,
+        }
     )
 
 
@@ -148,6 +156,8 @@ def create_source(body: SourceCreate, project: OwnedProject, db: DbSession) -> S
         display_name=body.display_name,
         config={"origin": "api", "settings": user_settings, "state": {}},
         sync_status=SYNC_NEEDS_AUTH if body.type == GMAIL else None,
+        # Telegram keeps updates for about 24 hours only, so its messages are fetched automatically by default
+        auto_sync=body.type == TELEGRAM,
     )
     db.add(source)
     db.commit()
@@ -155,48 +165,56 @@ def create_source(body: SourceCreate, project: OwnedProject, db: DbSession) -> S
     return _source_out(source, 0)
 
 
-def _sync_failed(db: DbSession, source: Source, sync_status: str, message: str, http_status: int) -> NoReturn:
-    """Store the failure on the source (so the card shows it) and answer with a clear message."""
-    source.sync_status = sync_status
-    source.sync_error = message
-    if sync_status == SYNC_NEEDS_AUTH and source.type == GMAIL:
-        source.credentials_encrypted = None  # revoked/expired or unreadable: connect again
-    db.commit()
-    raise HTTPException(http_status, detail=message)
+_SYNC_HTTP_STATUS = {
+    sync.NOT_CONFIGURED: status.HTTP_400_BAD_REQUEST,
+    sync.NEEDS_AUTH: status.HTTP_409_CONFLICT,
+    sync.CONNECTOR: status.HTTP_502_BAD_GATEWAY,
+    sync.UNEXPECTED: status.HTTP_502_BAD_GATEWAY,
+}
 
 
 @router.post("/sources/{source_id}/sync", response_model=SyncResult)
 def sync_source(source_id: int, project: OwnedProject, db: DbSession) -> SyncResult:
-    """Fetch new messages from the API. Messages that were already imported are skipped."""
+    """Fetch new messages from the API. Messages that were already imported are skipped.
+
+    409 while another sync of this source (e.g. an automatic one) is running. A failure is stored on the source,
+    so its card shows it, and answered with a clear message.
+    """
     source = _get_api_source(db, project, source_id)
     try:
-        with build_connector(source) as connector:
-            since = as_utc(source.last_synced_at) if source.last_synced_at else None
-            messages = connector.fetch(since=since)
-    except NotConfiguredError as exc:
-        _sync_failed(db, source, SYNC_ERROR, str(exc), status.HTTP_400_BAD_REQUEST)
-    except (NeedsAuthError, DecryptionError) as exc:
-        _sync_failed(db, source, SYNC_NEEDS_AUTH, str(exc), status.HTTP_409_CONFLICT)
-    except ConnectorError as exc:
-        _sync_failed(db, source, SYNC_ERROR, str(exc), status.HTTP_502_BAD_GATEWAY)
-    except Exception:
-        logger.exception("Sync of source %s (%s) failed", source.id, source.type)
-        _sync_failed(
-            db, source, SYNC_ERROR, "Unexpected error while syncing. See the backend log.", status.HTTP_502_BAD_GATEWAY
-        )
-
-    counts = import_messages(db, project.id, source, messages)
-    # Save the cursor only together with the messages, so nothing is skipped if storing fails
-    source.config = {**(source.config or {}), "state": connector.state}
-    source.sync_status = SYNC_OK
-    source.sync_error = None
-    db.commit()
+        outcome = sync.run_sync(db, source)
+    except sync.SyncLocked as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    if outcome.status != SYNC_OK:
+        raise HTTPException(_SYNC_HTTP_STATUS[outcome.reason], detail=outcome.error)
     return SyncResult(
-        imported=counts.imported,
-        duplicates=counts.duplicates,
+        imported=outcome.imported,
+        duplicates=outcome.duplicates,
         sync_status=SYNC_OK,
         last_synced_at=source.last_synced_at,
     )
+
+
+@router.patch("/sources/{source_id}/auto-sync", response_model=SourceOut)
+def update_auto_sync(source_id: int, body: AutoSyncUpdate, project: OwnedProject, db: DbSession) -> SourceOut:
+    """Turn auto-sync on or off and choose its interval (1, 5, 15 or 60 minutes).
+
+    Turning it on or changing the interval also ends a pause after errors and schedules the next run.
+    """
+    source = _get_api_source(db, project, source_id)
+    restart = False
+    if body.enabled is not None:
+        restart = body.enabled and (not source.auto_sync or source.auto_sync_paused)
+        source.auto_sync = body.enabled
+    if body.interval_minutes is not None and body.interval_minutes != source.sync_interval_minutes:
+        source.sync_interval_minutes = body.interval_minutes
+        restart = True
+    if restart:
+        source.failure_count = 0
+        source.auto_sync_paused = False
+        schedule_first_run(source, sync.utcnow())
+    db.commit()
+    return _source_out(source, _message_count(db, source))
 
 
 @router.get("/sources/{source_id}/status", response_model=SourceStatus)
@@ -268,6 +286,10 @@ def gmail_callback(db: DbSession, state: str = "", code: str = "", error: str = 
 
     source.sync_status = None
     source.sync_error = None
+    # A connected account starts auto-sync again (it stops while the account needs connecting)
+    source.failure_count = 0
+    source.auto_sync_paused = False
+    schedule_first_run(source, sync.utcnow())
     db.commit()
     return back("connected")
 

@@ -7,11 +7,21 @@ import ConnectorCards from "@/components/ConnectorCards";
 import NoProjectSelected from "@/components/NoProjectSelected";
 import SourceBadge, { sourceLabel } from "@/components/SourceBadge";
 import { ErrorBanner, errorText } from "@/components/ui";
-import { deleteSource, listSources, uploadFiles, type Source, type UploadResult } from "@/lib/api";
+import {
+  deleteSource,
+  getProject,
+  listSources,
+  updateProject,
+  uploadFiles,
+  type Source,
+  type UploadResult,
+} from "@/lib/api";
 import { useSelectedProject } from "@/lib/selectedProject";
 
 const ACCEPT = ".txt,.md,.eml,.json";
 const MAX_FILES = 10;
+// Reload the source list this often, so auto-sync results and times stay current
+const REFRESH_MS = 30_000;
 
 export default function SourcesPage() {
   const projectId = useSelectedProject();
@@ -71,7 +81,9 @@ function ProjectSources({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     loadSources();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per project (component is keyed by it)
+    const timer = window.setInterval(loadSources, REFRESH_MS);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per project (component is keyed by it)
   }, []);
 
   async function handleDelete(source: Source) {
@@ -116,6 +128,7 @@ function ProjectSources({ projectId }: { projectId: string }) {
   return (
     <>
       <h2 className="mt-8 text-lg font-medium">Connect an API</h2>
+      <AutoExtractToggle projectId={projectId} />
       <div className="mt-3">
         <ConnectorCards projectId={projectId} sources={sources} onChange={loadSources} />
       </div>
@@ -222,6 +235,50 @@ function ProjectSources({ projectId }: { projectId: string }) {
         </table>
       </div>
     </>
+  );
+}
+
+// Project setting: extract (and validate) requirements from messages that auto-sync brings in
+function AutoExtractToggle({ projectId }: { projectId: string }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    getProject(projectId)
+      .then((p) => setEnabled(p.auto_extract))
+      .catch((err) => setError(errorText(err)));
+  }, [projectId]);
+
+  async function handleChange(value: boolean) {
+    setSaving(true);
+    setError("");
+    try {
+      setEnabled((await updateProject(projectId, { auto_extract: value })).auto_extract);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-2">
+      <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+        <input
+          type="checkbox"
+          checked={enabled ?? false}
+          disabled={enabled === null || saving}
+          onChange={(e) => handleChange(e.target.checked)}
+          className="accent-indigo-500"
+        />
+        Auto-extract: find requirements in new auto-synced messages right away
+      </label>
+      <p className="mt-0.5 text-xs text-zinc-500">
+        The AI suggestions still wait for your review on the Requirements page.
+      </p>
+      {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
+    </div>
   );
 }
 

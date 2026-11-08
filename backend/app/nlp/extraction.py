@@ -372,6 +372,7 @@ def extract_requirements(
     *,
     force: bool = False,
     message_ids: list[int] | None = None,
+    only_message_ids: list[int] | None = None,
     llm_unavailable_reason: str | None = None,
 ) -> ExtractResult:
     """Extract requirements from the project's messages that were not read yet.
@@ -381,6 +382,9 @@ def extract_requirements(
     unavailable, the rest of the run uses the rules too. `llm=None` (no provider configured, the reason in
     `llm_unavailable_reason`) uses the rules for every batch. LLM batches start only within
     RUN_TIME_BUDGET_SECONDS; rule-based batches need no time.
+
+    `only_message_ids` limits the run to those messages, if not read yet (auto-extract after an auto-sync);
+    other unread messages wait for a normal run.
     """
     if force or message_ids is not None:
         # Mark the chosen messages as unread, so a run stopped by the per-run limit continues with a normal run
@@ -391,6 +395,8 @@ def extract_requirements(
         db.commit()
 
     pending = [Message.project_id == project.id, Message.requirements_extracted_at.is_(None)]
+    if only_message_ids is not None:
+        pending.append(Message.id.in_(only_message_ids))
     total = db.scalar(select(func.count()).select_from(Message).where(*pending)) or 0
     messages = db.scalars(
         select(Message).where(*pending).order_by(Message.sent_at, Message.id).limit(MAX_MESSAGES_PER_RUN)

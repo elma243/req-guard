@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # similar requirements are usually separate features (e.g. "reset password by email" vs "verify email").
     change_request_similarity: float = 0.75
 
+    # Background auto-sync of API sources (app/connectors/scheduler.py), inside the API process. Needs exactly one
+    # backend worker; set False for tests and for deploys with several workers or instances.
+    auto_sync_enabled: bool = True
+
     # Connectors
     jira_base_url: str | None = None
     jira_email: str | None = None
