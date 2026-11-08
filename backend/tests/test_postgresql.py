@@ -10,6 +10,8 @@ back at the end; the app's own commits only release savepoints, so nothing is le
 
 import os
 import uuid
+from contextlib import nullcontext
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -18,7 +20,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_optional_llm_client
 from app.core.db import get_db
 from app.main import app
-from app.models import Requirement, RequirementEmbedding
+from app.connectors import sync
+from app.connectors.scheduler import AutoSyncScheduler
+from app.models import Project, Requirement, RequirementEmbedding, Source, User
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set (PostgreSQL check)"
@@ -112,3 +116,54 @@ def test_extract_validate_and_extract_again(pg, client, outbox):
     ).all()
     assert codes == ["REQ-004", "REQ-005", "REQ-006"]
     assert client.post(f"{base}/requirements/validate", headers=headers).status_code == 200
+
+
+class _SharedSession:
+    """Session factory for the scheduler that hands out the test's session and leaves closing to the fixture."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def __call__(self):
+        return nullcontext(self.db)
+
+
+def test_auto_sync_tick_on_postgresql(pg, monkeypatch):
+    """The lock UPDATE, the scheduler, the badge count and auto-extract on real PostgreSQL."""
+    from tests.test_auto_sync import T0, FakeClock, FakeConnector, Script, msg
+
+    user = User(name="PG", email=f"pg-sync-{uuid.uuid4().hex[:12]}@example.com", password_hash="x")
+    pg.add(user)
+    pg.flush()
+    project = Project(name="PG auto-sync", owner_id=user.id, auto_extract=True)
+    pg.add(project)
+    pg.flush()
+    source = Source(
+        project_id=project.id,
+        type="slack",
+        display_name="Acme Slack",
+        config={"origin": "api", "settings": {}, "state": {}},
+        auto_sync=True,
+        next_sync_at=T0,
+    )
+    pg.add(source)
+    pg.commit()
+
+    # The lock: a second taker waits, a stale lock is taken over
+    assert sync.acquire_lock(pg, source.id, T0)
+    assert not sync.acquire_lock(pg, source.id, T0 + timedelta(minutes=1))
+    assert sync.acquire_lock(pg, source.id, T0 + sync.LOCK_TIMEOUT + timedelta(seconds=1))
+    pg.execute(text("UPDATE sources SET sync_started_at = NULL WHERE id = :id"), {"id": source.id})
+    pg.commit()
+
+    script = Script().then([msg("pg-1", "The dashboard must show the order list.")])
+    monkeypatch.setattr(sync, "build_connector", lambda s: FakeConnector(script))
+    scheduler = AutoSyncScheduler(_SharedSession(pg), FakeClock(), llm_factory=lambda: None)
+    assert scheduler.tick() == 1
+
+    pg.expire_all()
+    source = pg.get(Source, source.id)
+    assert source.sync_status == "ok" and source.sync_started_at is None
+    assert source.next_sync_at == T0 + timedelta(minutes=5)
+    assert pg.get(Project, project.id).unseen_auto_messages == 1
+    assert pg.scalar(select(func.count()).select_from(Requirement).where(Requirement.project_id == project.id)) == 1
