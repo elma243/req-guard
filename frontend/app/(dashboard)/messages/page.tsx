@@ -17,6 +17,7 @@ import {
   type MessageFilters,
   type MessagePage,
 } from "@/lib/api";
+import { markMessagesSeenNow } from "@/lib/newMessages";
 import { useSelectedProject } from "@/lib/selectedProject";
 
 const PAGE_SIZE = 50;
@@ -43,6 +44,11 @@ function MessagesForSelectedProject() {
 }
 
 function MessagesView({ projectId }: { projectId: string }) {
+  // Opening the page clears the "new messages" badge in the menu
+  useEffect(() => {
+    markMessagesSeenNow(projectId).catch(() => undefined);
+  }, [projectId]);
+
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();

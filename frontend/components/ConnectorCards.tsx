@@ -3,19 +3,27 @@
 // "Connect" cards for the API connectors (Jira, Slack, Gmail, Telegram, Discord) on the Sources page.
 // A connector whose token is missing from backend/.env shows "Not configured" with the variable names.
 // Tokens never reach the browser: the backend only says which variables are missing.
+// Each connected source has a Sync button and auto-sync settings (on/off, interval, last and next run).
 
 import { useEffect, useState } from "react";
 import TagInput from "@/components/TagInput";
 import { ErrorBanner, Label, errorText, inputClass, primaryButton, secondaryButton } from "@/components/ui";
 import {
+  SYNC_INTERVALS,
   createSource,
   gmailAuthorizeUrl,
   listConnectors,
+  setAutoSync,
   syncSource,
   type Connector,
   type Source,
+  type SyncInterval,
   type SyncResult,
 } from "@/lib/api";
+import { timeAgo, timeUntil } from "@/lib/time";
+
+// How often the relative times ("2 min ago") are refreshed
+const CLOCK_MS = 30_000;
 
 const smallPrimary =
   "rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60";
@@ -35,7 +43,8 @@ const DESCRIPTIONS: Record<string, string> = {
   jira: "Issues and comments of one Jira project.",
   slack: "Messages and thread replies from selected channels.",
   gmail: "Email threads that match a Gmail search.",
-  telegram: "Messages from groups the bot was added to.",
+  telegram:
+    "Messages from groups the bot was added to. Telegram keeps them about 24 hours, so auto-sync is on by default.",
   discord: "Messages from the text channels of a server.",
 };
 
@@ -91,11 +100,17 @@ type Props = {
 export default function ConnectorCards({ projectId, sources, onChange }: Props) {
   const [connectors, setConnectors] = useState<Connector[] | null>(null);
   const [error, setError] = useState("");
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     listConnectors()
       .then(setConnectors)
       .catch((err) => setError(errorText(err)));
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => window.clearInterval(timer);
   }, []);
 
   if (error) return <ErrorBanner message={error} />;
@@ -109,6 +124,7 @@ export default function ConnectorCards({ projectId, sources, onChange }: Props) 
           connector={c}
           projectId={projectId}
           sources={(sources ?? []).filter((s) => s.type === c.type)}
+          now={now}
           onChange={onChange}
         />
       ))}
@@ -120,11 +136,13 @@ function ConnectorCard({
   connector,
   projectId,
   sources,
+  now,
   onChange,
 }: {
   connector: Connector;
   projectId: string;
   sources: Source[];
+  now: number;
   onChange: () => Promise<unknown>;
 }) {
   const [adding, setAdding] = useState(false);
@@ -187,6 +205,7 @@ function ConnectorCard({
               source={s}
               projectId={projectId}
               configured={connector.configured}
+              now={now}
               onChange={onChange}
             />
           ))}
@@ -286,14 +305,17 @@ function SourceRow({
   source,
   projectId,
   configured,
+  now,
   onChange,
 }: {
   source: Source;
   projectId: string;
   configured: boolean;
+  now: number;
   onChange: () => Promise<unknown>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState("");
 
@@ -324,6 +346,24 @@ function SourceRow({
     }
   }
 
+  async function handleAutoSync(data: { enabled?: boolean; interval_minutes?: SyncInterval }) {
+    setSaving(true);
+    setError("");
+    try {
+      await setAutoSync(projectId, source.id, data);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      await onChange();
+      setSaving(false);
+    }
+  }
+
+  // A Gmail source that synced (or failed) before and lost its Google access: expired or revoked token
+  const reconnect = source.needs_auth && Boolean(source.last_synced_at || source.sync_error);
+  const autoRunning =
+    source.auto_sync && source.auto_sync_available && !source.auto_sync_paused && !source.needs_auth;
+  const syncing = busy || source.syncing;
   // The latest error comes from this click, else from the last sync stored on the source
   const shownError = error || (result ? "" : source.sync_error ?? "");
 
@@ -333,28 +373,76 @@ function SourceRow({
         <span className="text-sm font-medium text-zinc-200">{source.display_name}</span>
         <span className="text-xs text-zinc-500">
           {source.message_count} messages · last sync{" "}
-          {source.last_synced_at ? new Date(source.last_synced_at).toLocaleString() : "never"}
+          {source.last_synced_at ? (
+            <time dateTime={source.last_synced_at} title={new Date(source.last_synced_at).toLocaleString()}>
+              {timeAgo(source.last_synced_at, now)}
+            </time>
+          ) : (
+            "never"
+          )}
+          {autoRunning && source.next_sync_at && <> · next run {timeUntil(source.next_sync_at, now)}</>}
         </span>
         <span className="ml-auto">
           {source.needs_auth ? (
-            <button
-              onClick={handleConnectGoogle}
-              disabled={busy || !configured}
-              className={smallPrimary}
-            >
-              {busy ? "Opening Google..." : "Connect Google account"}
+            <button onClick={handleConnectGoogle} disabled={busy || !configured} className={smallPrimary}>
+              {busy ? "Opening Google..." : reconnect ? "Reconnect Google account" : "Connect Google account"}
             </button>
           ) : (
-            <button
-              onClick={handleSync}
-              disabled={busy || !configured}
-              className={smallPrimary}
-            >
-              {busy ? "Syncing..." : "Sync"}
+            <button onClick={handleSync} disabled={syncing || !configured} className={smallPrimary}>
+              {syncing ? "Syncing..." : "Sync"}
             </button>
           )}
         </span>
       </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+        <label className="inline-flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={source.auto_sync}
+            disabled={saving}
+            onChange={(e) => handleAutoSync({ enabled: e.target.checked })}
+            className="accent-indigo-500"
+          />
+          Auto-sync
+        </label>
+        <label className="inline-flex items-center gap-1.5">
+          every
+          <select
+            value={source.sync_interval_minutes}
+            disabled={saving || !source.auto_sync}
+            onChange={(e) => handleAutoSync({ interval_minutes: Number(e.target.value) as SyncInterval })}
+            className="rounded-md border border-white/10 bg-zinc-950/60 px-1.5 py-0.5 text-xs text-zinc-200 outline-none focus:border-indigo-400 disabled:opacity-50"
+          >
+            {SYNC_INTERVALS.map((m) => (
+              <option key={m} value={m}>
+                {m === 60 ? "1 hour" : `${m} min`}
+              </option>
+            ))}
+          </select>
+        </label>
+        {source.auto_sync && !source.auto_sync_available && (
+          <span className="text-amber-300">Auto-sync is turned off on this server.</span>
+        )}
+      </div>
+
+      {source.auto_sync && source.auto_sync_paused && (
+        <p className="mt-1.5 text-xs text-amber-300">
+          Paused after errors –{" "}
+          <button
+            onClick={handleSync}
+            disabled={syncing || !configured}
+            className="font-medium underline underline-offset-2 hover:text-amber-200 disabled:opacity-60"
+          >
+            {syncing ? "Retrying..." : "Retry"}
+          </button>
+        </p>
+      )}
+      {source.auto_sync && reconnect && (
+        <p className="mt-1.5 text-xs text-amber-300">
+          Auto-sync stopped: Google access expired. Reconnect the Google account to continue.
+        </p>
+      )}
       {result && (
         <p className="mt-1.5 text-xs text-emerald-300">
           {result.imported} new · {result.duplicates} already imported

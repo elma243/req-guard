@@ -128,6 +128,7 @@ export type Project = {
   description: string;
   scope_text: string;
   modules: ProjectModule[];
+  auto_extract: boolean; // extract requirements from auto-synced messages right after the sync
   owner_id: number;
   created_at: string;
   updated_at: string;
@@ -149,7 +150,10 @@ export function getProject(id: number | string) {
   return apiFetch<Project>(`/projects/${id}`);
 }
 
-export function updateProject(id: number | string, data: Partial<ProjectInput> & Pick<Partial<Project>, "modules">) {
+export function updateProject(
+  id: number | string,
+  data: Partial<ProjectInput> & Pick<Partial<Project>, "modules" | "auto_extract">,
+) {
   return apiFetch<Project>(`/projects/${id}`, { method: "PATCH", body: json(data) });
 }
 
@@ -207,7 +211,18 @@ export type Source = {
   sync_error: string | null;
   message_count: number;
   needs_auth: boolean; // Gmail source without a connected Google account
+  // Automatic sync (API sources)
+  auto_sync: boolean;
+  sync_interval_minutes: SyncInterval;
+  next_sync_at: string | null;
+  failure_count: number;
+  auto_sync_paused: boolean; // paused after 3 failed syncs in a row
+  syncing: boolean; // a sync is running right now
+  auto_sync_available: boolean; // false when the server runs with AUTO_SYNC_ENABLED=false
 };
+
+export const SYNC_INTERVALS = [1, 5, 15, 60] as const;
+export type SyncInterval = (typeof SYNC_INTERVALS)[number];
 
 export type FileImportResult = {
   filename: string;
@@ -276,12 +291,32 @@ export function getSourceStatus(projectId: number | string, sourceId: number) {
   return apiFetch<SourceStatus>(`/projects/${projectId}/sources/${sourceId}/status`);
 }
 
+export function setAutoSync(
+  projectId: number | string,
+  sourceId: number,
+  data: { enabled?: boolean; interval_minutes?: SyncInterval },
+) {
+  return apiFetch<Source>(`/projects/${projectId}/sources/${sourceId}/auto-sync`, {
+    method: "PATCH",
+    body: json(data),
+  });
+}
+
 // Google consent page for a Gmail source; the browser is sent there
 export function gmailAuthorizeUrl(projectId: number | string, sourceId: number) {
   return apiFetch<{ url: string }>(`/projects/${projectId}/sources/${sourceId}/gmail/authorize`);
 }
 
 // ---------- Messages ----------
+
+// Messages auto-sync imported since the Messages page was last opened (the menu badge)
+export function getUnseenMessages(projectId: number | string) {
+  return apiFetch<{ count: number }>(`/projects/${projectId}/messages/unseen`);
+}
+
+export function markMessagesSeen(projectId: number | string) {
+  return apiFetch<{ count: number }>(`/projects/${projectId}/messages/seen`, { method: "POST" });
+}
 
 export type Message = {
   id: number;
