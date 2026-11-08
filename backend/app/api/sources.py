@@ -6,7 +6,7 @@ encrypted on the Source (Gmail); no endpoint ever returns them.
 
 import logging
 from pathlib import PurePath
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import RedirectResponse
@@ -14,24 +14,23 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 
 from app.api.deps import CurrentUser, DbSession, OwnedProject
-from app.connectors.base import as_utc
+from app.connectors import sync
 from app.connectors.files import SUPPORTED_EXTENSIONS, connector_for_upload
 from app.connectors.gmail import GmailConnector, authorize_url, exchange_code
-from app.connectors.http import ConnectorError, NeedsAuthError, NotConfiguredError
+from app.connectors.http import ConnectorError
 from app.connectors.importer import get_or_create_source, import_messages
 from app.connectors.registry import (
     API_CONNECTORS,
-    build_connector,
     missing_env,
     needs_auth,
     not_configured_message,
     validate_settings,
 )
 from app.core.config import settings
-from app.core.crypto import DecryptionError, EncryptionKeyError, encrypt
+from app.core.crypto import EncryptionKeyError, encrypt
 from app.core.security import InvalidTokenError, create_oauth_state, decode_oauth_state
 from app.models import Message, Project, Source
-from app.models.source import SYNC_ERROR, SYNC_NEEDS_AUTH, SYNC_OK
+from app.models.source import SYNC_NEEDS_AUTH, SYNC_OK
 from app.schemas.message import (
     AuthorizeUrl,
     ConnectorOut,
@@ -155,45 +154,31 @@ def create_source(body: SourceCreate, project: OwnedProject, db: DbSession) -> S
     return _source_out(source, 0)
 
 
-def _sync_failed(db: DbSession, source: Source, sync_status: str, message: str, http_status: int) -> NoReturn:
-    """Store the failure on the source (so the card shows it) and answer with a clear message."""
-    source.sync_status = sync_status
-    source.sync_error = message
-    if sync_status == SYNC_NEEDS_AUTH and source.type == GMAIL:
-        source.credentials_encrypted = None  # revoked/expired or unreadable: connect again
-    db.commit()
-    raise HTTPException(http_status, detail=message)
+_SYNC_HTTP_STATUS = {
+    sync.NOT_CONFIGURED: status.HTTP_400_BAD_REQUEST,
+    sync.NEEDS_AUTH: status.HTTP_409_CONFLICT,
+    sync.CONNECTOR: status.HTTP_502_BAD_GATEWAY,
+    sync.UNEXPECTED: status.HTTP_502_BAD_GATEWAY,
+}
 
 
 @router.post("/sources/{source_id}/sync", response_model=SyncResult)
 def sync_source(source_id: int, project: OwnedProject, db: DbSession) -> SyncResult:
-    """Fetch new messages from the API. Messages that were already imported are skipped."""
+    """Fetch new messages from the API. Messages that were already imported are skipped.
+
+    409 while another sync of this source (e.g. an automatic one) is running. A failure is stored on the source,
+    so its card shows it, and answered with a clear message.
+    """
     source = _get_api_source(db, project, source_id)
     try:
-        with build_connector(source) as connector:
-            since = as_utc(source.last_synced_at) if source.last_synced_at else None
-            messages = connector.fetch(since=since)
-    except NotConfiguredError as exc:
-        _sync_failed(db, source, SYNC_ERROR, str(exc), status.HTTP_400_BAD_REQUEST)
-    except (NeedsAuthError, DecryptionError) as exc:
-        _sync_failed(db, source, SYNC_NEEDS_AUTH, str(exc), status.HTTP_409_CONFLICT)
-    except ConnectorError as exc:
-        _sync_failed(db, source, SYNC_ERROR, str(exc), status.HTTP_502_BAD_GATEWAY)
-    except Exception:
-        logger.exception("Sync of source %s (%s) failed", source.id, source.type)
-        _sync_failed(
-            db, source, SYNC_ERROR, "Unexpected error while syncing. See the backend log.", status.HTTP_502_BAD_GATEWAY
-        )
-
-    counts = import_messages(db, project.id, source, messages)
-    # Save the cursor only together with the messages, so nothing is skipped if storing fails
-    source.config = {**(source.config or {}), "state": connector.state}
-    source.sync_status = SYNC_OK
-    source.sync_error = None
-    db.commit()
+        outcome = sync.run_sync(db, source)
+    except sync.SyncLocked as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    if outcome.status != SYNC_OK:
+        raise HTTPException(_SYNC_HTTP_STATUS[outcome.reason], detail=outcome.error)
     return SyncResult(
-        imported=counts.imported,
-        duplicates=counts.duplicates,
+        imported=outcome.imported,
+        duplicates=outcome.duplicates,
         sync_status=SYNC_OK,
         last_synced_at=source.last_synced_at,
     )

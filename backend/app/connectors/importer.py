@@ -3,7 +3,7 @@
 Used by file uploads now and by the API connectors (Step 4) later.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -30,6 +30,8 @@ def _no_nul(value: str) -> str:
 class ImportCounts:
     imported: int = 0
     duplicates: int = 0
+    # Ids of the messages added by this import (known after the flush)
+    new_ids: list[int] = field(default_factory=list)
 
 
 def get_or_create_source(db: Session, project_id: int, type_: str, display_name: str, config: dict) -> Source:
@@ -70,6 +72,7 @@ def import_messages(
 ) -> ImportCounts:
     """Add new messages; ones with a known (source, external_id) count as duplicates. Does not commit."""
     counts = ImportCounts()
+    added: list[Message] = []
     by_source: dict[str, list[NormalizedMessage]] = {}
     for msg in messages:
         by_source.setdefault(msg.source, []).append(msg)
@@ -82,7 +85,7 @@ def import_messages(
                 counts.duplicates += 1
                 continue
             seen.add(external_id)
-            db.add(
+            added.append(
                 Message(
                     project_id=project_id,
                     source_id=source.id if source else None,
@@ -97,7 +100,9 @@ def import_messages(
             )
             counts.imported += 1
 
+    db.add_all(added)
     if source is not None:
         source.last_synced_at = datetime.now(timezone.utc)
     db.flush()
+    counts.new_ids = [m.id for m in added]
     return counts
