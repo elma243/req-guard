@@ -4,6 +4,7 @@
 Also decides which parser an uploaded file needs (`detect_type`, `connector_for_upload`).
 """
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -324,6 +325,46 @@ class MeetingNotesConnector(FileConnector):
 
 
 # ---------------------------------------------------------------------------
+# Voice note files (manual upload on the Sources page)
+# ---------------------------------------------------------------------------
+
+VOICE_SOURCE = "voice_upload"
+# Audio files the Sources page accepts
+VOICE_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".webm")
+
+
+class VoiceFileConnector(FileConnector):
+    """One uploaded audio file becomes one voice message. Its id is the hash of the audio, so uploading the same
+    file again is a duplicate."""
+
+    source = VOICE_SOURCE
+
+    def __init__(self, data: bytes, filename: str, now: datetime | None = None):
+        super().__init__(data, filename)
+        self.now = now
+
+    def parse(self) -> ParseResult:
+        digest = hashlib.sha1(self.data).hexdigest()
+        attachment = AudioAttachment(
+            file_id="file",
+            filename=self.filename,
+            mime_type=audio_mime(self.filename) or "audio/mpeg",
+            size=len(self.data),
+            data=self.data,
+        )
+        message = voice_message(
+            source=VOICE_SOURCE,
+            parent_id=digest,
+            channel="Voice notes",
+            author="",
+            sent_at=self.now or datetime.now(timezone.utc),
+            attachment=attachment,
+            raw={"filename": self.filename},
+        )
+        return ParseResult(messages=[message])
+
+
+# ---------------------------------------------------------------------------
 # Upload type detection
 # ---------------------------------------------------------------------------
 
@@ -334,8 +375,9 @@ CONNECTORS: dict[str, type[FileConnector]] = {
     "messenger_zip": MessengerZipConnector,
     EMAIL_SOURCE: EmailFileConnector,
     NOTES_SOURCE: MeetingNotesConnector,
+    VOICE_SOURCE: VoiceFileConnector,
 }
-SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json", ".zip")
+SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json", ".zip", *VOICE_EXTENSIONS)
 
 
 def zip_kind(data: bytes) -> str | None:
@@ -359,6 +401,8 @@ def detect_type(filename: str, data: bytes) -> str | None:
         return EMAIL_SOURCE
     if ext == ".zip":
         return zip_kind(data)
+    if ext in VOICE_EXTENSIONS:
+        return VOICE_SOURCE
     if ext == ".json":
         try:
             return "messenger" if is_messenger_json(json.loads(data.decode("utf-8-sig"))) else None

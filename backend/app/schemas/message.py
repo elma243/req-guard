@@ -97,6 +97,7 @@ class SourceStatus(BaseModel):
 class SyncResult(BaseModel):
     imported: int
     duplicates: int
+    voice_queued: int = 0
     sync_status: str
     last_synced_at: UtcDatetime | None
 
@@ -111,6 +112,9 @@ class FileImportResult(BaseModel):
     imported: int = 0
     duplicates: int = 0
     skipped: int = 0
+    # New voice notes: waiting for transcription, and ones that cannot be transcribed (reason on the message)
+    voice_queued: int = 0
+    voice_skipped: int = 0
     error: str | None = None
 
 
@@ -118,4 +122,6 @@ class UploadResult(BaseModel):
     imported: int
     duplicates: int
     skipped: int
+    voice_queued: int = 0
+    voice_skipped: int = 0
     files: list[FileImportResult]

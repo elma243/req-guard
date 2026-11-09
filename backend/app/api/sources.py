@@ -15,7 +15,8 @@ from sqlalchemy import delete, func, select
 
 from app.api.deps import CurrentUser, DbSession, OwnedProject
 from app.connectors import sync
-from app.connectors.files import SUPPORTED_EXTENSIONS, connector_for_upload
+from app.connectors.base import MAX_AUDIO_BYTES
+from app.connectors.files import SUPPORTED_EXTENSIONS, VOICE_EXTENSIONS, connector_for_upload
 from app.connectors.gmail import GmailConnector, authorize_url, exchange_code
 from app.connectors.http import ConnectorError
 from app.connectors.telegram import TelegramConnector
@@ -56,9 +57,22 @@ TELEGRAM = TelegramConnector.source
 
 MAX_FILES = 10
 MAX_FILE_BYTES = 10 * 1024 * 1024
+# Voice notes (Groq's limit for one transcription) and ZIP exports "with media"
+MAX_VOICE_BYTES = MAX_AUDIO_BYTES
+MAX_ZIP_BYTES = 100 * 1024 * 1024
 
-# Emails and meeting notes from many files are grouped under one source each
-GROUPED_SOURCE_NAMES = {"email": "Email files", "meeting_notes": "Meeting notes"}
+# Emails, meeting notes and voice notes from many files are grouped under one source each
+GROUPED_SOURCE_NAMES = {"email": "Email files", "meeting_notes": "Meeting notes", "voice_upload": "Voice notes"}
+
+
+def _size_limit(filename: str) -> tuple[int, str]:
+    """Largest upload for this file type, and the message when it is larger."""
+    ext = PurePath(filename).suffix.lower()
+    if ext in VOICE_EXTENSIONS:
+        return MAX_VOICE_BYTES, "Voice notes can be at most 25 MB."
+    if ext == ".zip":
+        return MAX_ZIP_BYTES, "ZIP files can be at most 100 MB."
+    return MAX_FILE_BYTES, "File is larger than 10 MB."
 
 
 @router.get("/sources", response_model=list[SourceOut])
@@ -190,6 +204,7 @@ def sync_source(source_id: int, project: OwnedProject, db: DbSession) -> SyncRes
     return SyncResult(
         imported=outcome.imported,
         duplicates=outcome.duplicates,
+        voice_queued=outcome.voice_queued,
         sync_status=SYNC_OK,
         last_synced_at=source.last_synced_at,
     )
@@ -314,8 +329,8 @@ def _import_file(db: DbSession, project_id: int, filename: str, data: bytes) -> 
         return FileImportResult(
             filename=filename,
             type=None,
-            error=f"Unsupported file. Upload a WhatsApp .txt export, a Messenger .json export, "
-            f"an .eml email or .txt/.md meeting notes ({', '.join(SUPPORTED_EXTENSIONS)}).",
+            error="Unsupported file. Upload a WhatsApp .txt or .zip export, a Messenger .json or .zip export, "
+            f"an .eml email, .txt/.md meeting notes or a voice note ({', '.join(SUPPORTED_EXTENSIONS)}).",
         )
     try:
         messages = connector.fetch()
@@ -334,6 +349,8 @@ def _import_file(db: DbSession, project_id: int, filename: str, data: bytes) -> 
         imported=counts.imported,
         duplicates=counts.duplicates,
         skipped=connector.skipped,
+        voice_queued=counts.voice_queued,
+        voice_skipped=counts.voice_skipped,
     )
 
 
@@ -341,20 +358,25 @@ def _import_file(db: DbSession, project_id: int, filename: str, data: bytes) -> 
 def upload_files(
     project: OwnedProject,
     db: DbSession,
-    files: Annotated[list[UploadFile], File(description="Chat exports, .eml emails or meeting notes")],
+    files: Annotated[
+        list[UploadFile], File(description="Chat exports (.txt/.json or ZIP with media), emails, notes, voice notes")
+    ],
 ) -> UploadResult:
-    """Import messages from uploaded files. The type of each file is detected from its name and content."""
+    """Import messages from uploaded files. The type of each file is detected from its name and content.
+
+    Voice notes (audio files, and audio inside exports) are queued for transcription; the worker transcribes them
+    in the background.
+    """
     if len(files) > MAX_FILES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"Upload at most {MAX_FILES} files at once")
 
     results: list[FileImportResult] = []
     for upload in files:
         filename = PurePath(upload.filename or "upload").name
-        data = upload.file.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            results.append(
-                FileImportResult(filename=filename, type=None, error="File is larger than 10 MB.")
-            )
+        limit, too_large = _size_limit(filename)
+        data = upload.file.read(limit + 1)
+        if len(data) > limit:
+            results.append(FileImportResult(filename=filename, type=None, error=too_large))
             continue
         results.append(_import_file(db, project.id, filename, data))
     db.commit()
@@ -363,5 +385,7 @@ def upload_files(
         imported=sum(r.imported for r in results),
         duplicates=sum(r.duplicates for r in results),
         skipped=sum(r.skipped for r in results),
+        voice_queued=sum(r.voice_queued for r in results),
+        voice_skipped=sum(r.voice_skipped for r in results),
         files=results,
     )
