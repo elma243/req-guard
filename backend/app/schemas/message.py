@@ -5,8 +5,29 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from app.schemas.common import UtcDatetime
 
 
+class VoiceInfo(BaseModel):
+    """What the Messages page shows about a voice note (from Message.raw["voice"])."""
+
+    filename: str | None = None
+    duration: float | None = None
+    # Language Whisper detected, e.g. "bengali"; the model that transcribed it
+    language: str | None = None
+    model: str | None = None
+
+    @classmethod
+    def of(cls, raw: dict | None) -> "VoiceInfo | None":
+        voice = (raw or {}).get("voice")
+        if not isinstance(voice, dict):
+            return None
+        return cls.model_validate({k: voice.get(k) for k in ("filename", "duration", "language", "model")})
+
+
 class MessageOut(BaseModel):
-    """A message in lists. `raw` is left out to keep pages small."""
+    """A message in lists. `raw` is left out to keep pages small.
+
+    Voice notes have kind "voice" and their transcript as `text`. transcript_status: pending | transcribing |
+    done | failed (Retry) | skipped (cannot be transcribed; the reason is in transcript_error).
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -19,6 +40,12 @@ class MessageOut(BaseModel):
     sent_at: UtcDatetime
     text: str
     imported_at: UtcDatetime
+    kind: str = "text"
+    transcript_status: str | None = None
+    transcript_error: str | None = None
+    # The audio is stored (KEEP_AUDIO, or not transcribed yet): the page can play it
+    has_audio: bool = False
+    voice: VoiceInfo | None = None
 
 
 class MessagePage(BaseModel):

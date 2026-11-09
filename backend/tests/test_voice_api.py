@@ -83,3 +83,104 @@ def test_whatsapp_zip_upload(client, owner):
     body = upload(client, headers, base, ("WhatsApp Chat with Acme.zip", buffer.getvalue())).json()
     assert body["files"][0]["type"] == "whatsapp"
     assert (body["imported"], body["voice_queued"], body["voice_skipped"]) == (3, 1, 1)
+
+
+# ---------- messages ----------
+
+
+def _set(db_session_factory, **values):
+    """Change the only voice message of the test, as the worker would."""
+    with db_session_factory() as db:
+        message = db.query(Message).filter(Message.kind == "voice").one()
+        for key, value in values.items():
+            setattr(message, key, value)
+        db.commit()
+        return message.id
+
+
+def test_messages_show_voice_fields(client, owner, db_session_factory):
+    headers, base = owner
+    upload(client, headers, base, ("brief.m4a", b"fake-m4a"), ("notes.md", b"Login page lagbe."))
+    items = client.get(f"{base}/messages", headers=headers).json()["items"]
+    voice = next(m for m in items if m["kind"] == "voice")
+    text = next(m for m in items if m["kind"] == "text")
+    assert (voice["text"], voice["transcript_status"], voice["has_audio"]) == ("", "pending", True)
+    assert voice["voice"]["filename"] == "brief.m4a"
+    assert (text["transcript_status"], text["has_audio"], text["voice"]) == (None, False, None)
+
+
+def test_retry_queues_a_failed_voice_note(client, owner, db_session_factory):
+    headers, base = owner
+    upload(client, headers, base, ("brief.m4a", b"fake-m4a"))
+    message_id = _set(db_session_factory, transcript_status="failed", transcript_error="Groq is busy",
+                      transcript_attempts=5)
+
+    res = client.post(f"{base}/messages/{message_id}/transcribe", headers=headers)
+    assert res.status_code == 200, res.text
+    assert (res.json()["transcript_status"], res.json()["transcript_error"]) == ("pending", None)
+    with db_session_factory() as db:
+        assert db.get(Message, message_id).transcript_attempts == 0
+
+    _set(db_session_factory, transcript_status="done", text="Transcript")
+    assert client.post(f"{base}/messages/{message_id}/transcribe", headers=headers).status_code == 409
+    _set(db_session_factory, transcript_status="skipped", transcript_error="Too large")
+    res = client.post(f"{base}/messages/{message_id}/transcribe", headers=headers)
+    assert res.status_code == 400 and "Too large" in res.json()["detail"]
+
+
+def test_retry_only_for_voice_notes(client, owner):
+    headers, base = owner
+    upload(client, headers, base, ("notes.md", b"Login page lagbe."))
+    message_id = client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+    assert client.post(f"{base}/messages/{message_id}/transcribe", headers=headers).status_code == 400
+
+
+def test_audio_endpoint_plays_stored_audio(client, owner, make_user, db_session_factory):
+    headers, base = owner
+    upload(client, headers, base, ("brief.m4a", b"fake-m4a"))
+    message_id = client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+
+    res = client.get(f"{base}/messages/{message_id}/audio", headers=headers)
+    assert res.status_code == 200
+    assert (res.content, res.headers["content-type"]) == (b"fake-m4a", "audio/mp4")
+
+    _, stranger = make_user()
+    assert client.get(f"{base}/messages/{message_id}/audio", headers=stranger).status_code == 404
+    with db_session_factory() as db:
+        db.delete(db.get(VoiceAudio, message_id))
+        db.commit()
+    assert client.get(f"{base}/messages/{message_id}/audio", headers=headers).status_code == 404
+
+
+def test_deleting_a_voice_message_deletes_its_audio(client, owner, db_session_factory):
+    headers, base = owner
+    upload(client, headers, base, ("brief.m4a", b"fake-m4a"))
+    message_id = client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+    assert client.delete(f"{base}/messages/{message_id}", headers=headers).status_code == 204
+    with db_session_factory() as db:
+        assert db.query(VoiceAudio).count() == 0
+
+
+# ---------- project setting and requirement sources ----------
+
+
+def test_voice_language_setting(client, owner):
+    headers, base = owner
+    assert client.get(base, headers=headers).json()["voice_language"] == "auto"
+    res = client.patch(base, json={"voice_language": "bn"}, headers=headers)
+    assert res.status_code == 200 and res.json()["voice_language"] == "bn"
+    assert client.patch(base, json={"voice_language": "fr"}, headers=headers).status_code == 422
+
+
+def test_requirement_from_a_transcript_shows_its_voice_source(client, owner, db_session_factory):
+    headers, base = owner
+    upload(client, headers, base, ("brief.m4a", b"fake-m4a"))
+    _set(db_session_factory, transcript_status="done", text="The admin dashboard must show the daily order report.",
+         raw={"voice": {"filename": "brief.m4a", "duration": 4.2, "language": "english", "model": "whisper-large-v3"}})
+
+    assert client.post(f"{base}/requirements/extract", headers=headers).status_code == 200
+    requirements = client.get(f"{base}/requirements", headers=headers).json()
+    assert requirements and requirements[0]["sources"][0]["message_kind"] == "voice"
+    detail = client.get(f"{base}/requirements/{requirements[0]['id']}", headers=headers).json()
+    source = detail["sources"][0]
+    assert (source["has_audio"], source["voice"]["duration"], source["voice"]["language"]) == (True, 4.2, "english")

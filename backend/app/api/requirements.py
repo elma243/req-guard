@@ -19,6 +19,7 @@ from app.nlp.extraction import extract_requirements
 from app.nlp.pair_checks import check_similarity
 from app.nlp.validate import validate_project, validate_requirement
 from app.schemas.extraction import ExtractResult
+from app.schemas.message import VoiceInfo
 from app.schemas.requirement import (
     BulkRequest,
     BulkResult,
@@ -66,6 +67,7 @@ def _source(s: RequirementSource) -> dict:
         "author": s.message.author,
         "sent_at": s.message.sent_at,
         "merged_from_id": s.merged_from_id,
+        "message_kind": s.message.kind,
     }
 
 
@@ -105,7 +107,15 @@ def _out(r: Requirement) -> RequirementOut:
 def _detail(r: Requirement) -> RequirementDetail:
     return RequirementDetail(
         **_out(r).model_dump(exclude={"sources"}),
-        sources=[RequirementSourceDetail(**_source(s), message_text=s.message.text) for s in r.sources],
+        sources=[
+            RequirementSourceDetail(
+                **_source(s),
+                message_text=s.message.text,
+                has_audio=s.message.audio is not None,
+                voice=VoiceInfo.of(s.message.raw) if s.message.kind == "voice" else None,
+            )
+            for s in r.sources
+        ],
         versions=[RequirementVersionOut.model_validate(v) for v in r.versions],
         findings=[ValidationFindingOut.model_validate(f) for f in r.findings],
     )

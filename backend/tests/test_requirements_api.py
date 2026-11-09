@@ -285,7 +285,8 @@ def test_edit_creates_new_version_and_keeps_old(client, extracted):
     assert (first["version"], first["origin"], first["statement"]) == (1, "ai", req["current"]["statement"])
     assert (first["confidence"], first["ai_model"]) == (0.92, "fake-model")
     assert body["origin"] == "ai"  # the requirement itself stays AI-found
-    assert [{k: v for k, v in s.items() if k != "message_text"} for s in body["sources"]] == req["sources"]
+    detail_only = {"message_text", "has_audio", "voice"}
+    assert [{k: v for k, v in s.items() if k not in detail_only} for s in body["sources"]] == req["sources"]
 
     detail = client.get(f"{base}/requirements/{req['id']}", headers=headers).json()
     assert [v["version"] for v in detail["versions"]] == [1, 2]
