@@ -10,16 +10,28 @@ class VoiceInfo(BaseModel):
 
     filename: str | None = None
     duration: float | None = None
-    # Language Whisper detected, e.g. "bengali"; the model that transcribed it
+    # Final language of the transcript ("bangla", "english", else Whisper's name) and the model that wrote it
     language: str | None = None
     model: str | None = None
+    # "auto", "bn" or "en"; what Whisper detected first (e.g. "hindi"); whether it was transcribed again as Bangla
+    requested_language: str | None = None
+    detected_language: str | None = None
+    retried: bool = False
+    retry_reason: str | None = None
+    # Earlier transcripts kept in raw["voice"]["history"] (Re-transcribe)
+    previous_transcripts: int = 0
 
     @classmethod
     def of(cls, raw: dict | None) -> "VoiceInfo | None":
         voice = (raw or {}).get("voice")
         if not isinstance(voice, dict):
             return None
-        return cls.model_validate({k: voice.get(k) for k in ("filename", "duration", "language", "model")})
+        keys = ("filename", "duration", "language", "model", "requested_language", "detected_language",
+                "retry_reason")
+        values = {k: voice.get(k) for k in keys}
+        return cls.model_validate(
+            {**values, "retried": bool(voice.get("retried")), "previous_transcripts": len(voice.get("history") or [])}
+        )
 
 
 class MessageOut(BaseModel):
@@ -45,7 +57,13 @@ class MessageOut(BaseModel):
     transcript_error: str | None = None
     # The audio is stored (KEEP_AUDIO, or not transcribed yet): the page can play it
     has_audio: bool = False
+    # Re-transcribe as Bangla / English is possible: the audio is stored or the connector can download it again
+    can_retranscribe: bool = False
     voice: VoiceInfo | None = None
+
+
+class RetranscribeRequest(BaseModel):
+    language: Literal["bn", "en"]
 
 
 class MessagePage(BaseModel):

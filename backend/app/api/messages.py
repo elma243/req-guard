@@ -7,13 +7,18 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
-from app.ai.speech import queue_again
-from app.api.deps import DbSession, OwnedProject
+from app.ai import speech
+from app.ai.speech import RetranscribeBusy, RetranscribeError, TranscriptionNotConfigured, can_retranscribe, queue_again
+from app.api.deps import DbSession, OptionalLLM, OwnedProject
 from app.models import Message, Project, VoiceAudio
 from app.models.message import KIND_VOICE, TRANSCRIPT_DONE, TRANSCRIPT_RUNNING, TRANSCRIPT_SKIPPED
-from app.schemas.message import MessageOut, MessagePage, UnseenMessages, VoiceInfo
+from app.nlp.extraction import extract_requirements
+from app.nlp.validate import validate_project
+from app.schemas.extraction import ExtractResult
+from app.schemas.message import MessageOut, MessagePage, RetranscribeRequest, UnseenMessages, VoiceInfo
 
 router = APIRouter(prefix="/projects/{project_id}/messages", tags=["messages"])
 
@@ -32,7 +37,26 @@ def message_out(message: Message, has_audio: bool) -> MessageOut:
     out = MessageOut.model_validate(message)
     if message.kind != KIND_VOICE:
         return out
-    return out.model_copy(update={"has_audio": has_audio, "voice": VoiceInfo.of(message.raw)})
+    return out.model_copy(
+        update={
+            "has_audio": has_audio,
+            "can_retranscribe": can_retranscribe(message, has_audio),
+            "voice": VoiceInfo.of(message.raw),
+        }
+    )
+
+
+class RetranscribeResult(BaseModel):
+    message: MessageOut
+    # Extraction run again on the new transcript (unreviewed AI suggestions from the old one are replaced)
+    extraction: ExtractResult
+
+
+NO_LLM_CONFIGURED = "No AI model is configured. Set GROQ_API_KEY, or LLM_MODEL and LLM_API_KEY, in backend/.env."
+NO_AUDIO_KEPT = (
+    "The audio of this voice note was deleted after transcription (KEEP_AUDIO=false), so it cannot be transcribed "
+    "again. Upload the file again, or set KEEP_AUDIO=true for new voice notes."
+)
 
 
 def _with_audio(db: DbSession, message_ids: list[int]) -> set[int]:
@@ -122,6 +146,40 @@ def retry_transcription(message_id: int, project: OwnedProject, db: DbSession) -
     queue_again(db, message)
     db.commit()
     return message_out(message, bool(_with_audio(db, [message.id])))
+
+
+@router.post("/{message_id}/retranscribe", response_model=RetranscribeResult)
+def retranscribe_message(
+    message_id: int, body: RetranscribeRequest, project: OwnedProject, db: DbSession, llm: OptionalLLM
+) -> RetranscribeResult:
+    """Re-transcribe as Bangla / English: a new transcript (the old one is kept in raw["voice"]["history"]), then
+    requirement extraction and validation run again for this message."""
+    message = _get_message(db, project, message_id)
+    if message.kind != KIND_VOICE:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Only voice notes are transcribed.")
+    if not can_retranscribe(message, bool(_with_audio(db, [message.id]))):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=NO_AUDIO_KEPT)
+    try:
+        transcriber = speech.get_transcriber()
+    except TranscriptionNotConfigured as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    try:
+        with transcriber:
+            speech.retranscribe(db, message, body.language, transcriber)
+    except RetranscribeBusy as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from None
+    except RetranscribeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=f"{exc} The old transcript was kept.") from None
+
+    extraction = extract_requirements(
+        db, project, llm, message_ids=[message.id], llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED
+    )
+    extraction.similarity_unavailable_reason = validate_project(
+        db, project, only_new=True, llm=llm
+    ).similarity_unavailable_reason
+    db.commit()
+    db.refresh(message)
+    return RetranscribeResult(message=message_out(message, bool(_with_audio(db, [message.id]))), extraction=extraction)
 
 
 @router.get("/{message_id}/audio")

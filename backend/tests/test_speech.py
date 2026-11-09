@@ -33,7 +33,8 @@ def groq_ok(text=TRANSCRIPT, language="Bengali", duration=4.2):
 
 def field(request: httpx.Request, name: str) -> str | None:
     """A form field of a multipart request."""
-    match = re.search(rf'name="{name}"\r\n\r\n(.*?)\r\n', request.content.decode("latin-1"), re.DOTALL)
+    content = request.content.decode("utf-8", "replace")
+    match = re.search(rf'name="{name}"\r\n\r\n(.*?)\r\n', content, re.DOTALL)
     return match.group(1) if match else None
 
 
@@ -54,7 +55,8 @@ def test_sends_model_prompt_and_language():
     assert field(request, "prompt") == PROMPT
     assert field(request, "language") == "bn"
     assert field(request, "response_format") == "verbose_json"
-    assert 'filename="PTT-1.ogg"' in request.content.decode("latin-1")  # .opus is sent as .ogg
+    assert 'filename="PTT-1.ogg"' in request.content.decode("utf-8", "replace")  # .opus is sent as .ogg
+    assert "অর্ডার" in PROMPT and "bKash" in PROMPT  # Bengali script and English project words
     assert (result.text, result.language, result.duration, result.model) == (
         TRANSCRIPT, "bengali", 4.2, "whisper-large-v3"
     )
@@ -172,8 +174,9 @@ def test_tick_stores_transcript_and_deletes_audio(db, project, db_session_factor
     assert (stored.transcript_status, stored.text, stored.transcript_error) == ("done", TRANSCRIPT, None)
     voice = stored.raw["voice"]
     assert (voice["language"], voice["model"], voice["duration"], voice["file_id"]) == (
-        "bengali", "whisper-large-v3", 4.2, "v1"
+        "bangla", "whisper-large-v3", 4.2, "v1"
     )
+    assert (voice["requested_language"], voice["detected_language"], voice["retried"]) == ("bn", "bengali", False)
     assert db.get(VoiceAudio, message.id) is None
     assert field(route.calls.last.request, "language") == "bn"
     assert worker(db_session_factory).tick() == 0  # nothing left
@@ -285,3 +288,186 @@ def test_transcript_is_auto_extracted_when_the_project_asks(db, project, db_sess
     requirements = db.query(Requirement).all()
     assert requirements
     assert requirements[0].sources[0].source_sentence == TRANSCRIPT
+
+
+# ---------- Languages ----------
+
+BANGLA = "আমার অ্যাপে order checker option লাগবে"
+HINDI_SCRIPT = "आमार एपे order checker option लगे"
+
+
+def by_language(first: httpx.Response, as_bn: httpx.Response):
+    """Whisper mock: `first` for the Auto request, `as_bn` for the request with language=bn."""
+    return lambda request: as_bn if field(request, "language") == "bn" else first
+
+
+@pytest.fixture
+def auto_note(db, project):
+    return add_voice(db, project)  # the project's voice language is Auto by default
+
+
+@respx.mock
+def test_hindi_detected_is_transcribed_again_as_bangla(db, auto_note, db_session_factory):
+    route = respx.post(GROQ_URL).mock(
+        side_effect=by_language(groq_ok("Amar app e order checker lagbe", "hindi"), groq_ok(BANGLA, "bengali"))
+    )
+    worker(db_session_factory).tick()
+
+    assert [field(c.request, "language") for c in route.calls] == [None, "bn"]
+    assert all(field(c.request, "model") == "whisper-large-v3" for c in route.calls)
+    db.expire_all()
+    stored = db.get(Message, auto_note.id)
+    voice = stored.raw["voice"]
+    assert stored.text == BANGLA
+    assert (voice["requested_language"], voice["detected_language"], voice["language"]) == ("auto", "hindi", "bangla")
+    assert (voice["retried"], voice["retried_as"], voice["retry_reason"]) == (True, "bn", "detected hindi")
+
+
+@respx.mock
+def test_devanagari_text_is_transcribed_again(db, auto_note, db_session_factory):
+    route = respx.post(GROQ_URL).mock(
+        side_effect=by_language(groq_ok(HINDI_SCRIPT, "bengali"), groq_ok(BANGLA, "bengali"))
+    )
+    worker(db_session_factory).tick()
+
+    assert route.call_count == 2
+    db.expire_all()
+    stored = db.get(Message, auto_note.id)
+    assert stored.text == BANGLA
+    assert stored.raw["voice"]["retry_reason"] == "Devanagari text"
+    assert stored.raw["voice"]["language"] == "bangla"
+
+
+@respx.mock
+def test_english_stays_english(db, auto_note, db_session_factory):
+    route = respx.post(GROQ_URL).mock(return_value=groq_ok(TRANSCRIPT, "English"))
+    worker(db_session_factory).tick()
+
+    assert route.call_count == 1
+    assert field(route.calls[0].request, "language") is None
+    db.expire_all()
+    voice = db.get(Message, auto_note.id).raw["voice"]
+    assert (voice["language"], voice["detected_language"], voice["retried"]) == ("english", "english", False)
+
+
+@respx.mock
+def test_a_chosen_language_is_not_second_guessed(db, project, db_session_factory):
+    add_voice(db, project)
+    project.voice_language = "en"
+    db.commit()
+    route = respx.post(GROQ_URL).mock(return_value=groq_ok("Order list lagbe", "hindi"))
+    worker(db_session_factory).tick()
+    assert route.call_count == 1
+    request = route.calls[0].request
+    assert (field(request, "language"), field(request, "prompt")) == ("en", speech.PROMPT_EN)
+
+
+@respx.mock
+def test_allowed_languages_are_configurable(db, auto_note, db_session_factory, monkeypatch):
+    monkeypatch.setattr(settings, "voice_allowed_languages", "bn")
+    route = respx.post(GROQ_URL).mock(side_effect=by_language(groq_ok(TRANSCRIPT, "english"), groq_ok(BANGLA)))
+    worker(db_session_factory).tick()
+    assert route.call_count == 2
+    db.expire_all()
+    assert db.get(Message, auto_note.id).raw["voice"]["retry_reason"] == "detected english"
+
+
+@respx.mock
+def test_turbo_is_not_asked_when_large_rejects_the_audio():
+    route = respx.post(GROQ_URL).mock(return_value=httpx.Response(400, json={"error": {"message": "bad audio"}}))
+    with pytest.raises(speech.TranscriptionError):
+        whisper().transcribe(b"fake", "a.ogg", "audio/ogg", "bn")
+    assert route.call_count == 1  # turbo is only for an unavailable large-v3
+
+
+# ---------- Re-transcribe as Bangla / English ----------
+
+
+@pytest.fixture
+def api_owner(client, make_user, monkeypatch):
+    monkeypatch.setattr(settings, "groq_api_key", "gsk-test")
+    monkeypatch.setattr(settings, "keep_audio", True)
+    _, headers = make_user()
+    project = client.post("/projects", json={"name": "Acme"}, headers=headers).json()
+    return headers, f"/projects/{project['id']}"
+
+
+def _upload_and_transcribe(client, api_owner, db_session_factory, first: httpx.Response) -> int:
+    headers, base = api_owner
+    files = [("files", ("note.m4a", b"fake-m4a", "audio/mp4"))]
+    assert client.post(f"{base}/uploads", files=files, headers=headers).status_code == 200
+    with respx.mock:
+        respx.post(GROQ_URL).mock(return_value=first)
+        worker(db_session_factory, transcriber_factory=speech.get_transcriber).tick()
+    return client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+
+
+def _retranscribe(client, api_owner, message_id: int, language: str):
+    headers, base = api_owner
+    return client.post(f"{base}/messages/{message_id}/retranscribe", json={"language": language}, headers=headers)
+
+
+def test_manual_retranscribe_keeps_history_and_extracts_again(client, api_owner, db_session_factory):
+    headers, base = api_owner
+    message_id = _upload_and_transcribe(
+        client, api_owner, db_session_factory, groq_ok("Login AirPort Dash 4 Day", "English")
+    )
+    listed = client.get(f"{base}/messages", headers=headers).json()["items"][0]
+    assert listed["can_retranscribe"] is True and listed["voice"]["language"] == "english"
+
+    with respx.mock:
+        route = respx.post(GROQ_URL).mock(return_value=groq_ok(TRANSCRIPT, "English"))
+        res = _retranscribe(client, api_owner, message_id, "en")
+    assert res.status_code == 200, res.text
+    assert field(route.calls[0].request, "language") == "en"
+    body = res.json()
+    assert body["message"]["text"] == TRANSCRIPT
+    assert body["message"]["voice"]["requested_language"] == "en"
+    assert body["message"]["voice"]["previous_transcripts"] == 1
+    assert body["extraction"]["messages_processed"] == 1
+    assert body["extraction"]["requirements_created"] >= 1
+
+    with db_session_factory() as db:
+        history = db.get(Message, message_id).raw["voice"]["history"]
+    assert history[0]["text"] == "Login AirPort Dash 4 Day"
+    assert history[0]["language"] == "english"
+
+
+def test_retranscribe_as_bangla(client, api_owner, db_session_factory):
+    message_id = _upload_and_transcribe(client, api_owner, db_session_factory, groq_ok(TRANSCRIPT, "English"))
+    with respx.mock:
+        route = respx.post(GROQ_URL).mock(return_value=groq_ok(BANGLA, "Bengali"))
+        res = _retranscribe(client, api_owner, message_id, "bn")
+    assert res.status_code == 200, res.text
+    assert route.call_count == 1 and field(route.calls[0].request, "language") == "bn"
+    assert (res.json()["message"]["text"], res.json()["message"]["voice"]["language"]) == (BANGLA, "bangla")
+
+
+def test_retranscribe_failure_keeps_the_old_transcript(client, api_owner, db_session_factory):
+    message_id = _upload_and_transcribe(client, api_owner, db_session_factory, groq_ok(TRANSCRIPT, "English"))
+    with respx.mock:
+        respx.post(GROQ_URL).mock(return_value=httpx.Response(400, json={"error": {"message": "bad audio"}}))
+        res = _retranscribe(client, api_owner, message_id, "bn")
+    assert res.status_code == 502 and "old transcript was kept" in res.json()["detail"]
+    with db_session_factory() as db:
+        stored = db.get(Message, message_id)
+        assert (stored.text, stored.transcript_status) == (TRANSCRIPT, "done")
+
+
+def test_retranscribe_needs_the_audio(client, api_owner, db_session_factory, monkeypatch):
+    headers, base = api_owner
+    monkeypatch.setattr(settings, "keep_audio", False)
+    message_id = _upload_and_transcribe(client, api_owner, db_session_factory, groq_ok(TRANSCRIPT, "English"))
+    assert client.get(f"{base}/messages", headers=headers).json()["items"][0]["can_retranscribe"] is False
+    res = _retranscribe(client, api_owner, message_id, "bn")
+    assert res.status_code == 409 and "KEEP_AUDIO" in res.json()["detail"]
+
+
+def test_retranscribe_waits_for_a_pending_note(client, api_owner):
+    headers, base = api_owner
+    files = [("files", ("note.m4a", b"fake-m4a", "audio/mp4"))]
+    client.post(f"{base}/uploads", files=files, headers=headers)
+    message_id = client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+    res = _retranscribe(client, api_owner, message_id, "bn")
+    assert res.status_code == 409 and "waiting" in res.json()["detail"]
+    assert _retranscribe(client, api_owner, message_id, "hi").status_code == 422

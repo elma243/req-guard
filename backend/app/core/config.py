@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     whisper_fallback_model: str = "whisper-large-v3-turbo"
     # Groq's free limit for audio models is 20 requests per minute
     groq_audio_rpm: int = 20
+    # Languages voice notes are expected in (codes). In Auto mode a note Whisper hears as another language (Hindi,
+    # Urdu, Nepali, Assamese...) or writes in Devanagari is transcribed again as Bangla.
+    voice_allowed_languages: str = "bn,en"
     # Keep the audio after transcription (playable on the Messages page). False deletes it once transcribed.
     keep_audio: bool = False
 

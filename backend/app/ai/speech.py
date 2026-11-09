@@ -3,10 +3,17 @@
 Connectors only report audio attachments (app/connectors/base.py); the importer stores each one as a voice message
 with transcript_status "pending" (and its audio in voice_audio when the upload carried it). This module:
 
-- `GroqWhisper`: Groq's OpenAI-compatible /audio/transcriptions endpoint over httpx (no SDK). It sends
-  WHISPER_MODEL (whisper-large-v3) and, when that model is busy, rate limited or fails, WHISPER_FALLBACK_MODEL
-  (whisper-large-v3-turbo) once. A short prompt with common project words helps the spelling; the project's
-  voice language is sent as `language` (Auto sends none). The answer is validated with a Pydantic model.
+- `GroqWhisper`: Groq's OpenAI-compatible /audio/transcriptions endpoint over httpx (no SDK). It always sends
+  WHISPER_MODEL (whisper-large-v3, the better model for Bangla); WHISPER_FALLBACK_MODEL (whisper-large-v3-turbo)
+  is asked only when large-v3 is unavailable (busy, rate limited, timed out). A short prompt with project words
+  in Bengali script and English helps the spelling and the script. The answer is validated with a Pydantic model.
+- Languages (`transcribe_with_languages`): the project's voice language is sent as `language` (Auto sends none).
+  In Auto mode Whisper often hears Bangla as Hindi (Devanagari text) or another neighbour language. When the
+  detected language is not one of VOICE_ALLOWED_LANGUAGES (default Bangla and English), or the text contains
+  Devanagari, the audio is transcribed once more with language="bn". `raw["voice"]` records the requested and
+  detected language, whether that retry happened and the final language ("bangla" / "english").
+- `retranscribe`: the "Re-transcribe as Bangla / English" button. The old transcript is kept in
+  `raw["voice"]["history"]`.
 - `RateLimiter`: at most GROQ_AUDIO_RPM requests per 60 seconds for the whole process (Groq free tier: 20).
   A 429/503 is retried after Retry-After or 2/4/8 seconds; after that the message goes back to the queue with a
   later `transcribe_after`, and after MAX_ATTEMPTS it is marked failed (the Retry button queues it again).
@@ -20,6 +27,7 @@ Never logged: the API key and the transcript (it contains client messages).
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -52,8 +60,21 @@ from app.models.message import (
 logger = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-# Common words of the client projects, so Whisper spells them the same way (and keeps "bKash", "OTP")
-PROMPT = "Login, dashboard, order, payment, report, OTP, admin, bKash."
+# Common words of the client projects, so Whisper spells them the same way (and keeps "bKash", "OTP"). The Bengali
+# script words also steer Bangla speech to Bengali script instead of Devanagari.
+PROMPT_EN = "login, dashboard, order, payment, report, OTP, admin, bKash"
+PROMPT = f"অর্ডার, লগইন, ড্যাশবোর্ড, পেমেন্ট, রিপোর্ট, {PROMPT_EN}"
+
+# Whisper's language names → codes, for the neighbours it confuses with Bangla
+LANGUAGE_CODES = {
+    "bengali": "bn", "bangla": "bn", "english": "en", "hindi": "hi", "urdu": "ur", "nepali": "ne",
+    "assamese": "as", "marathi": "mr", "punjabi": "pa", "gujarati": "gu", "oriya": "or", "odia": "or",
+    "sanskrit": "sa", "sinhala": "si", "tamil": "ta", "telugu": "te", "kannada": "kn", "malayalam": "ml",
+}
+# Final language shown for a voice note
+LANGUAGE_LABELS = {"bn": "bangla", "en": "english"}
+# Devanagari letters (Hindi, Marathi, Nepali...): Bangla heard as Hindi comes back in this script
+DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 TIMEOUT_SECONDS = 120.0
 
 # Retries of one request on 429/503: waits before retry 1, 2 and 3 when there is no Retry-After header
@@ -214,15 +235,13 @@ class GroqWhisper:
         return text.replace(self._api_key, "***") if self._api_key else text
 
     def transcribe(self, data: bytes, filename: str, mime_type: str, language: str | None) -> TranscriptResult:
-        """Try each model in turn. A bad key fails at once; other errors try the next model."""
+        """The first model (large-v3); the next one only when it is unavailable. Other errors fail at once."""
         last: TranscriptionError | None = None
         for model in self.models:
             try:
                 return self._transcribe(model, data, filename, mime_type, language)
-            except TranscriptionNotConfigured:
-                raise
-            except TranscriptionError as exc:
-                logger.warning("speech model=%s failed: %s", model, exc)
+            except TranscriptionUnavailable as exc:
+                logger.warning("speech model=%s unavailable: %s", model, exc)
                 last = exc
         raise last or TranscriptionError("No Whisper model is configured (WHISPER_MODEL).")
 
@@ -230,7 +249,7 @@ class GroqWhisper:
         self, model: str, data: bytes, filename: str, mime_type: str, language: str | None
     ) -> TranscriptResult:
         name, mime = upload_name(filename, mime_type)
-        form = {"model": model, "response_format": "verbose_json", "temperature": "0", "prompt": PROMPT}
+        form = {"model": model, "response_format": "verbose_json", "temperature": "0", "prompt": prompt_for(language)}
         if language:
             form["language"] = language
         retries = 0
@@ -281,6 +300,103 @@ class GroqWhisper:
             duration=answer.duration,
             model=model,
         )
+
+
+def prompt_for(language: str | None) -> str:
+    """English notes get only the English words; Bangla and Auto get both scripts."""
+    return PROMPT_EN if language == "en" else PROMPT
+
+
+def language_code(language: str | None) -> str | None:
+    """"bengali" / "bn" → "bn"; None when unknown."""
+    value = (language or "").strip().lower()
+    if not value:
+        return None
+    return value if len(value) <= 3 else LANGUAGE_CODES.get(value)
+
+
+def language_label(code: str | None, detected: str | None = None) -> str | None:
+    """Final language label: "bangla", "english", else Whisper's name for it."""
+    return LANGUAGE_LABELS.get(code or "") or ((detected or "").strip().lower() or None)
+
+
+def allowed_languages() -> list[str]:
+    codes = [c.strip().lower() for c in settings.voice_allowed_languages.split(",") if c.strip()]
+    return codes or ["bn", "en"]
+
+
+def retry_language(allowed: list[str]) -> str:
+    """Language for the second try in Auto mode: Bangla when allowed (the language Whisper mistakes)."""
+    return "bn" if "bn" in allowed else next((c for c in allowed if c != "en"), allowed[0])
+
+
+@dataclass
+class Transcription:
+    """A transcript with its language history, as stored in raw["voice"]."""
+
+    text: str
+    model: str
+    duration: float | None
+    language: str | None  # final label: "bangla" / "english" / Whisper's name
+    requested_language: str  # "auto", "bn" or "en"
+    detected_language: str | None  # Whisper's answer to the first request
+    retried: bool = False
+    retried_as: str | None = None
+    retry_reason: str | None = None
+
+    def fields(self) -> dict:
+        return {
+            "language": self.language,
+            "requested_language": self.requested_language,
+            "detected_language": self.detected_language,
+            "retried": self.retried,
+            "retried_as": self.retried_as,
+            "retry_reason": self.retry_reason,
+            "model": self.model,
+        }
+
+
+def transcribe_with_languages(
+    transcriber: "GroqWhisper",
+    data: bytes,
+    filename: str,
+    mime_type: str,
+    requested: str | None,
+    allowed: list[str] | None = None,
+) -> Transcription:
+    """Transcribe; in Auto mode retry once with language="bn" when Whisper picked a language that is not allowed
+    or wrote Devanagari. A requested language (project setting or Re-transcribe) is never second-guessed."""
+    allowed = allowed or allowed_languages()
+    first = transcriber.transcribe(data, filename, mime_type, requested)
+    detected_code = language_code(first.language)
+    if requested:
+        return Transcription(
+            text=first.text, model=first.model, duration=first.duration,
+            language=language_label(requested, first.language), requested_language=requested,
+            detected_language=first.language,
+        )
+
+    reason = None
+    if DEVANAGARI_RE.search(first.text):
+        reason = "Devanagari text"
+    elif first.language and detected_code not in allowed:
+        reason = f"detected {first.language}"
+    if reason is None:
+        return Transcription(
+            text=first.text, model=first.model, duration=first.duration,
+            language=language_label(detected_code, first.language), requested_language="auto",
+            detected_language=first.language,
+        )
+
+    target = retry_language(allowed)
+    logger.info("speech retry language=%s reason=%s", target, reason)
+    second = transcriber.transcribe(data, filename, mime_type, target)
+    return Transcription(
+        text=second.text, model=second.model,
+        duration=second.duration if second.duration is not None else first.duration,
+        language=language_label(target, second.language), requested_language="auto",
+        detected_language=first.language, retried=True, retried_as=target, retry_reason=reason,
+    )
 
 
 def get_transcriber() -> GroqWhisper:
@@ -376,7 +492,7 @@ def transcribe_message(db: Session, message: Message, transcriber: GroqWhisper, 
     """Transcribe one claimed voice message and store the result. Returns its new transcript_status."""
     try:
         data, filename, mime_type, stored = _audio(db, message)
-        result = transcriber.transcribe(data, filename, mime_type, _language(db, message))
+        result = transcribe_with_languages(transcriber, data, filename, mime_type, _language(db, message))
     except AudioTooLargeError:
         return _finish(db, message, TRANSCRIPT_SKIPPED, TOO_LARGE_NOTE)
     except TranscriptionUnavailable as exc:
@@ -399,10 +515,21 @@ def transcribe_message(db: Session, message: Message, transcriber: GroqWhisper, 
         db.rollback()
         return fail(db, message, UNEXPECTED)
 
+    _store(db, message, result, data, filename, mime_type, stored)
+    return _finish(db, message, TRANSCRIPT_DONE, None)
+
+
+def _store(
+    db: Session, message: Message, result: Transcription, data: bytes, filename: str, mime_type: str, stored: bool
+) -> None:
+    """Save the transcript as the message text and its language details in raw["voice"]; keep or drop the audio.
+    The previous transcript, if any, goes to raw["voice"]["history"]."""
     voice = dict((message.raw or {}).get("voice") or {})
+    if voice.get("transcribed_at"):
+        earlier = {k: voice.get(k) for k in (*result.fields(), "transcribed_at")}
+        voice["history"] = [*(voice.get("history") or []), {**earlier, "text": message.text}]
     voice.update(
-        language=result.language,
-        model=result.model,
+        result.fields(),
         duration=result.duration if result.duration is not None else voice.get("duration"),
         transcribed_at=utcnow().isoformat(),
     )
@@ -418,8 +545,59 @@ def transcribe_message(db: Session, message: Message, transcriber: GroqWhisper, 
         message.audio = None
     # A message read again after a new transcript gives its requirements again
     message.requirements_extracted_at = None
-    logger.info("speech message=%d transcribed model=%s seconds=%s", message.id, result.model, result.duration)
-    return _finish(db, message, TRANSCRIPT_DONE, None)
+    logger.info(
+        "speech message=%d transcribed model=%s language=%s retried=%s seconds=%s",
+        message.id, result.model, result.language, result.retried, result.duration,
+    )
+
+
+class RetranscribeError(Exception):
+    """Re-transcription failed; the old transcript is kept."""
+
+
+class RetranscribeBusy(RetranscribeError):
+    """The voice note is waiting for or in transcription right now."""
+
+
+def can_retranscribe(message: Message, has_audio: bool) -> bool:
+    """The audio is stored, or the source's connector can download it again."""
+    return message.kind == KIND_VOICE and (
+        has_audio or (message.source in API_CONNECTORS and message.source_id is not None)
+    )
+
+
+def retranscribe(db: Session, message: Message, language: str, transcriber: "GroqWhisper") -> None:
+    """Transcribe a voice note again in the given language ("bn" / "en") and commit. The old transcript goes to
+    raw["voice"]["history"]. Raises RetranscribeError (old transcript kept) when it is not possible or fails."""
+    previous = message.transcript_status
+    if previous not in (TRANSCRIPT_DONE, TRANSCRIPT_FAILED):
+        raise RetranscribeBusy("This voice note is waiting to be transcribed; try again when it is done.")
+    claimed = db.execute(
+        update(Message)
+        .where(Message.id == message.id, Message.transcript_status == previous)
+        .values(transcript_status=TRANSCRIPT_RUNNING, transcribe_after=utcnow())
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    db.commit()
+    if claimed != 1:
+        raise RetranscribeBusy("This voice note is being transcribed right now; try again in a moment.")
+    db.refresh(message)
+    try:
+        data, filename, mime_type, stored = _audio(db, message)
+        result = transcribe_with_languages(transcriber, data, filename, mime_type, language)
+    except Exception as exc:
+        db.rollback()
+        message.transcript_status = previous
+        message.transcribe_after = None
+        db.commit()
+        if isinstance(exc, (TranscriptionError, ConnectorError, DecryptionError, AudioTooLargeError)):
+            raise RetranscribeError(str(exc)) from None
+        if isinstance(exc, NotImplementedError):
+            raise RetranscribeError(NO_AUDIO) from None
+        logger.exception("re-transcription of message %s failed", message.id)
+        raise RetranscribeError(UNEXPECTED) from None
+    _store(db, message, result, data, filename, mime_type, stored)
+    _finish(db, message, TRANSCRIPT_DONE, None, attempts=0)
 
 
 def queue_again(db: Session, message: Message) -> None:
