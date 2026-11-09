@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 
 from app.ai import speech
 from app.ai.speech import (
@@ -471,3 +472,32 @@ def test_retranscribe_waits_for_a_pending_note(client, api_owner):
     res = _retranscribe(client, api_owner, message_id, "bn")
     assert res.status_code == 409 and "waiting" in res.json()["detail"]
     assert _retranscribe(client, api_owner, message_id, "hi").status_code == 422
+
+
+def test_retranscribe_reads_only_its_message_then_validates(client, api_owner, db_session_factory):
+    """Regression: re-transcribe used to extract every unread message of the project (e.g. "7 new requirements"
+    from one short note) and could then write embeddings for versions another extraction had deleted."""
+    from app.models import RequirementEmbedding, RequirementVersion
+
+    headers, base = api_owner
+    first = "The admin must export the report. The dashboard must show orders. Users must log in with OTP."
+    message_id = _upload_and_transcribe(client, api_owner, db_session_factory, groq_ok(first, "English"))
+    extracted = client.post(f"{base}/requirements/extract", json={"message_ids": [message_id]}, headers=headers)
+    assert extracted.json()["requirements_created"] == 3
+    # Another message that nobody extracted yet
+    client.post(f"{base}/uploads", files=[("files", ("notes.md", b"The app must send SMS alerts."))], headers=headers)
+
+    with respx.mock:
+        respx.post(GROQ_URL).mock(return_value=groq_ok("The admin must export the report as PDF. Users must log in."))
+        res = _retranscribe(client, api_owner, message_id, "en")
+    assert res.status_code == 200, res.text
+    extraction = res.json()["extraction"]
+    assert (extraction["messages_processed"], extraction["requirements_created"]) == (1, 2)
+
+    with db_session_factory() as db:
+        notes = db.scalar(select(Message).where(Message.source == "meeting_notes"))
+        assert notes.requirements_extracted_at is None  # left for the Extract button
+        statements = sorted(db.scalars(select(RequirementVersion.statement)))
+        assert len(statements) == 2  # the 3 old suggestions were replaced
+        versions = set(db.scalars(select(RequirementVersion.id)))
+        assert set(db.scalars(select(RequirementEmbedding.version_id))) == versions

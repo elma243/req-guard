@@ -229,3 +229,101 @@ def test_voice_note_transcription_on_postgresql(pg, monkeypatch):
     assert message.raw["voice"]["detected_language"] == "bengali"
     assert pg.get(VoiceAudio, message_id) is None
     assert pg.scalar(select(func.count()).select_from(Requirement).where(Requirement.project_id == project.id)) == 1
+
+
+def test_retranscribe_then_validate_on_postgresql(pg, client, make_user, monkeypatch):
+    """Regression: re-transcribe deletes the message's unreviewed AI requirements, extracts it again and validates.
+    Embeddings must only be written for versions that still exist (a 500 with a foreign key error on Supabase)."""
+    import httpx
+    import respx
+
+    from app.ai import speech
+    from app.ai.speech import GROQ_URL, TranscriptionWorker
+    from app.core.config import settings
+    from app.models import Message, RequirementEmbedding, RequirementVersion
+
+    monkeypatch.setattr(settings, "groq_api_key", "gsk-test")
+    monkeypatch.setattr(settings, "keep_audio", True)
+    monkeypatch.setattr(speech, "sleep", lambda seconds: None)
+    _, headers = make_user()
+    project_id = client.post("/projects", json={"name": "PG re-transcribe"}, headers=headers).json()["id"]
+    base = f"/projects/{project_id}"
+
+    def groq(text: str):
+        return httpx.Response(200, json={"text": text, "language": "English", "duration": 3.0})
+
+    first = "The admin must export the report. The dashboard must show orders. Users must log in with OTP."
+    # Another note and a chat file that were never extracted: re-transcribing one note must not read them
+    files = [("files", ("note.m4a", b"fake-m4a", "audio/mp4")), ("files", ("notes.md", b"The app must send SMS."))]
+    assert client.post(f"{base}/uploads", files=files, headers=headers).status_code == 200
+    with respx.mock:
+        respx.post(GROQ_URL).mock(return_value=groq(first))
+        TranscriptionWorker(_SharedSession(pg), llm_factory=lambda: None).tick()
+    note = pg.scalar(select(Message).where(Message.project_id == project_id, Message.kind == "voice"))
+    # Extract only the note, validate (stores embeddings for its requirements)
+    res = client.post(f"{base}/requirements/extract", json={"message_ids": [note.id]}, headers=headers)
+    assert res.status_code == 200, res.text
+    assert (res.json()["messages_processed"], res.json()["requirements_created"]) == (1, 3)  # not notes.md
+    before = pg.scalars(
+        select(RequirementVersion.id).join(Requirement).where(Requirement.project_id == note.project_id)
+    ).all()
+    assert len(before) == 3
+
+    with respx.mock:
+        respx.post(GROQ_URL).mock(return_value=groq("The admin must export the report as PDF. Users must log in."))
+        res = client.post(f"{base}/messages/{note.id}/retranscribe", json={"language": "en"}, headers=headers)
+    assert res.status_code == 200, res.text
+    extraction = res.json()["extraction"]
+    assert extraction["messages_processed"] == 1  # only this note, not the other unread messages
+    assert extraction["requirements_created"] == 2
+
+    pg.expire_all()
+    versions = set(
+        pg.scalars(select(RequirementVersion.id).join(Requirement).where(Requirement.project_id == project_id)).all()
+    )
+    embedded = set(
+        pg.scalars(
+            select(RequirementEmbedding.version_id)
+            .join(RequirementVersion)
+            .join(Requirement)
+            .where(Requirement.project_id == project_id)
+        ).all()
+    )
+    assert versions == embedded and len(versions) == 2
+    assert not set(before) & versions  # the old suggestions were replaced
+    notes = pg.scalar(select(Message).where(Message.project_id == project_id, Message.source == "meeting_notes"))
+    assert notes.requirements_extracted_at is None
+
+
+def test_embeddings_skip_versions_deleted_meanwhile_on_postgresql(pg):
+    """A version deleted after it was loaded (by another extraction) gets no embedding and no foreign key error."""
+    from app.models import RequirementEmbedding, RequirementVersion
+    from app.nlp.similarity import ensure_embeddings
+    from tests.fake_models import FakeEmbedder
+
+    user = User(name="PG", email=f"pg-stale-{uuid.uuid4().hex[:12]}@example.com", password_hash="x")
+    pg.add(user)
+    pg.flush()
+    project = Project(name="PG stale", owner_id=user.id)
+    pg.add(project)
+    pg.flush()
+    requirements = [
+        Requirement(
+            project_id=project.id, number=n, code=f"REQ-{n:03d}", origin="ai", status="suggested",
+            versions=[RequirementVersion(version=1, statement=f"Statement {n}", type="functional", actor="",
+                                         origin="ai")],
+        )
+        for n in (1, 2)
+    ]
+    pg.add_all(requirements)
+    pg.commit()
+    kept, gone = (r.current for r in requirements)
+    pg.execute(text("DELETE FROM requirements WHERE id = :id"), {"id": requirements[1].id})
+
+    vectors = ensure_embeddings(pg, FakeEmbedder(), [kept, gone])
+    pg.flush()
+    assert set(vectors) == {kept.id}
+    stored = pg.scalars(
+        select(RequirementEmbedding.version_id).where(RequirementEmbedding.version_id.in_([kept.id, gone.id]))
+    ).all()
+    assert stored == [kept.id]

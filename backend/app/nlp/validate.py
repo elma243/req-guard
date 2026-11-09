@@ -395,6 +395,9 @@ def validate_project(
     models are unavailable the rule-based findings are still stored and the result says why. `llm` checks the
     pairs the models flag (see app/nlp/pair_checks.py).
     """
+    # Sessions keep objects across commits (expire_on_commit=False). After extraction replaced suggestions, rows
+    # removed by ON DELETE CASCADE (findings, versions) can still sit in loaded collections, so they are read again.
+    db.flush()
     query = (
         select(Requirement)
         .where(Requirement.project_id == project.id)
@@ -403,6 +406,7 @@ def validate_project(
             selectinload(Requirement.sources),
             selectinload(Requirement.findings),
         )
+        .execution_options(populate_existing=True)
     )
     if only_new:
         query = query.where(Requirement.quality_score.is_(None))

@@ -385,7 +385,9 @@ def extract_requirements(
     RUN_TIME_BUDGET_SECONDS; rule-based batches need no time.
 
     `only_message_ids` limits the run to those messages, if not read yet (auto-extract after an auto-sync);
-    other unread messages wait for a normal run.
+    other unread messages wait for a normal run. `message_ids` also limits the run to those messages: reading one
+    message again (Re-transcribe) must not pick up the project's other unread messages, which auto-extract may be
+    reading at the same time.
     """
     if force or message_ids is not None:
         # Mark the chosen messages as unread, so a run stopped by the per-run limit continues with a normal run
@@ -403,6 +405,8 @@ def extract_requirements(
     ]
     if only_message_ids is not None:
         pending.append(Message.id.in_(only_message_ids))
+    if message_ids is not None:
+        pending.append(Message.id.in_(message_ids))
     total = db.scalar(select(func.count()).select_from(Message).where(*pending)) or 0
     messages = db.scalars(
         select(Message).where(*pending).order_by(Message.sent_at, Message.id).limit(MAX_MESSAGES_PER_RUN)
