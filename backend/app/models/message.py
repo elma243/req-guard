@@ -3,10 +3,8 @@ from datetime import datetime
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.connectors.base import KIND_TEXT, KIND_VOICE  # noqa: F401  (one definition of the kinds)
 from app.core.db import Base, JsonType
-
-KIND_TEXT = "text"
-KIND_VOICE = "voice"
 
 # Transcription of a voice message (app/ai/speech.py). None for text messages.
 TRANSCRIPT_PENDING = "pending"  # waiting for the transcription worker
