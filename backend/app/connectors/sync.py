@@ -44,6 +44,7 @@ class SyncOutcome:
     imported: int = 0
     duplicates: int = 0
     new_message_ids: list[int] = field(default_factory=list)
+    voice_queued: int = 0
     error: str | None = None
     reason: str | None = None  # NOT_CONFIGURED | NEEDS_AUTH | CONNECTOR | UNEXPECTED when it failed
 
@@ -116,7 +117,11 @@ def _fetch_and_store(db: Session, source: Source) -> SyncOutcome:
     source.auto_sync_paused = False  # a successful sync (e.g. the Retry button) ends a pause
     db.commit()
     return SyncOutcome(
-        status=SYNC_OK, imported=counts.imported, duplicates=counts.duplicates, new_message_ids=counts.new_ids
+        status=SYNC_OK,
+        imported=counts.imported,
+        duplicates=counts.duplicates,
+        new_message_ids=counts.new_ids,
+        voice_queued=counts.voice_queued,
     )
 
 

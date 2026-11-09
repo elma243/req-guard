@@ -216,6 +216,7 @@ def judge_pairs(
     missing = list(dict.fromkeys((old, new) for old, new in pairs if (old.id, new.id) not in answers))
     if llm is None or not missing:
         return answers
+    new_verdicts: list[PairVerdict] = []
 
     deadline = now() + LLM_SECONDS
     for start in range(0, len(missing), PAIR_BATCH_SIZE):
@@ -241,7 +242,7 @@ def judge_pairs(
                 continue
             answers[(old.id, new.id)] = (judgement.relation, judgement.reason)
             if judgement.relation != "not_enough_information":
-                db.add(
+                new_verdicts.append(
                     PairVerdict(
                         older_version_id=old.id,
                         newer_version_id=new.id,
@@ -250,6 +251,11 @@ def judge_pairs(
                         ai_model=llm.last_model,
                     )
                 )
+    # Verdicts are a cache: one for a version deleted meanwhile is not stored (it would break the foreign key)
+    existing = similarity.existing_version_ids(
+        db, [v.older_version_id for v in new_verdicts] + [v.newer_version_id for v in new_verdicts]
+    )
+    db.add_all(v for v in new_verdicts if v.older_version_id in existing and v.newer_version_id in existing)
     db.flush()
     return answers
 
@@ -266,10 +272,14 @@ def check_similarity(
     Suggested findings that involve a rejected or merged requirement are removed in any case, even without
     the models.
     """
+    # Fresh from the database (pending changes written first): never compare cached objects of requirements that
+    # were replaced or deleted since they were loaded
+    db.flush()
     requirements = db.scalars(
         select(Requirement)
         .where(Requirement.project_id == project.id)
         .options(selectinload(Requirement.versions), selectinload(Requirement.findings))
+        .execution_options(populate_existing=True)
     ).all()
     candidates = sorted((r for r in requirements if r.status not in CLOSED), key=lambda r: r.number)
     open_ids = {r.id for r in candidates}
@@ -294,6 +304,8 @@ def check_similarity(
 
     try:  # a model failing while it runs must not break the edit or review that asked for the check
         vectors = similarity.ensure_embeddings(db, embedder, [r.current for r in candidates])
+        # A version deleted meanwhile (another extraction replaced its suggestion) is left out of the batch
+        candidates = [r for r in candidates if r.current.id in vectors]
         scores = similarity.similarity_matrix([vectors[r.current.id] for r in candidates])
         pairs = []
         for i, j in np.argwhere(np.triu(scores >= CONFLICT_CANDIDATE, k=1)):

@@ -10,6 +10,7 @@ from app.models.source import Source
 from app.models.team_member import TEAM_ROLES, TeamMember
 from app.models.user import User
 from app.models.validation import ValidationFinding
+from app.models.voice_audio import VoiceAudio
 
 __all__ = [
     "EmailOtp",
@@ -26,4 +27,5 @@ __all__ = [
     "TeamMember",
     "User",
     "ValidationFinding",
+    "VoiceAudio",
 ]

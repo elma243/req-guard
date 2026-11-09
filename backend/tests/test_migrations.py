@@ -53,6 +53,12 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     }
 
     assert "requirement_embeddings" in inspect(engine).get_table_names()
+    assert "voice_audio" in inspect(engine).get_table_names()
+    assert {"kind", "transcript_status", "transcript_error", "transcript_attempts", "transcribe_after"} <= {
+        c["name"] for c in inspect(engine).get_columns("messages")
+    }
+    assert "voice_language" in {c["name"] for c in inspect(engine).get_columns("projects")}
+    assert "ck_projects_voice_language" in {c["name"] for c in inspect(engine).get_check_constraints("projects")}
     assert {"related_requirement_id", "score"} <= {c["name"] for c in inspect(engine).get_columns("validation_findings")}
     with engine.begin() as connection:  # the pair categories pass the recreated check constraint
         category_check = connection.execute(
@@ -74,6 +80,7 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("validation_findings", "requirements") == "CASCADE"
     assert on_delete("email_otps", "users") == "CASCADE"
     assert on_delete("requirement_embeddings", "requirement_versions") == "CASCADE"
+    assert on_delete("voice_audio", "messages") == "CASCADE"
     assert on_delete("requirement_pair_verdicts", "requirement_versions") == "CASCADE"
     related = [
         fk

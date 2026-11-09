@@ -6,19 +6,22 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import ConnectorCards from "@/components/ConnectorCards";
 import NoProjectSelected from "@/components/NoProjectSelected";
 import SourceBadge, { sourceLabel } from "@/components/SourceBadge";
-import { ErrorBanner, errorText } from "@/components/ui";
+import { ErrorBanner, errorText, inputClass } from "@/components/ui";
 import {
+  UPLOAD_ACCEPT,
+  VOICE_LANGUAGES,
   deleteSource,
   getProject,
   listSources,
   updateProject,
   uploadFiles,
+  type Project,
   type Source,
   type UploadResult,
+  type VoiceLanguage,
 } from "@/lib/api";
 import { useSelectedProject } from "@/lib/selectedProject";
 
-const ACCEPT = ".txt,.md,.eml,.json";
 const MAX_FILES = 10;
 // Reload the source list this often, so auto-sync results and times stay current
 const REFRESH_MS = 30_000;
@@ -30,7 +33,8 @@ export default function SourcesPage() {
     <div className="max-w-5xl">
       <h1 className="text-2xl font-semibold tracking-tight">Sources</h1>
       <p className="mt-1.5 text-sm text-zinc-400">
-        Connect Jira, Slack, Gmail, Telegram or Discord, or upload chat exports, emails and meeting notes.
+        Connect Jira, Slack, Gmail, Telegram or Discord, or upload chat exports, emails, meeting notes and voice
+        notes.
       </p>
       {/* useSearchParams needs a Suspense boundary */}
       <Suspense fallback={null}>
@@ -128,7 +132,7 @@ function ProjectSources({ projectId }: { projectId: string }) {
   return (
     <>
       <h2 className="mt-8 text-lg font-medium">Connect an API</h2>
-      <AutoExtractToggle projectId={projectId} />
+      <ProjectSettings projectId={projectId} />
       <div className="mt-3">
         <ConnectorCards projectId={projectId} sources={sources} onChange={loadSources} />
       </div>
@@ -156,16 +160,21 @@ function ProjectSources({ projectId }: { projectId: string }) {
         <p className="mt-3 text-sm font-medium text-zinc-200">
           {uploading ? "Importing..." : "Drop files here, or click to choose"}
         </p>
-        <p className="mt-1.5 max-w-lg text-xs text-zinc-500">
-          WhatsApp &ldquo;Export chat&rdquo; .txt · Messenger message_1.json · .eml emails · .txt/.md meeting notes.
-          Up to {MAX_FILES} files, 10 MB each. Messages that were already imported are skipped.
+        <p className="mt-1.5 max-w-xl text-xs text-zinc-500">
+          WhatsApp &ldquo;Export chat&rdquo; .txt, or the .zip exported &ldquo;with media&rdquo; for voice notes ·
+          Messenger message_1.json, or the export folder as .zip · .eml emails · .txt/.md meeting notes · voice notes
+          (.mp3, .m4a, .ogg/.opus, .wav, .webm).
+        </p>
+        <p className="mt-1 max-w-xl text-xs text-zinc-500">
+          Up to {MAX_FILES} files: 10 MB each, voice notes 25 MB, ZIPs 100 MB. Messages that were already imported are
+          skipped.
         </p>
         <input
           ref={inputRef}
           id="upload-input"
           type="file"
           multiple
-          accept={ACCEPT}
+          accept={UPLOAD_ACCEPT}
           className="sr-only"
           onChange={(e) => handleFiles(e.target.files)}
         />
@@ -238,23 +247,24 @@ function ProjectSources({ projectId }: { projectId: string }) {
   );
 }
 
-// Project setting: extract (and validate) requirements from messages that auto-sync brings in
-function AutoExtractToggle({ projectId }: { projectId: string }) {
-  const [enabled, setEnabled] = useState<boolean | null>(null);
+// Project settings: auto-extract (requirements from auto-synced messages and new transcripts right away) and the
+// language of voice notes
+function ProjectSettings({ projectId }: { projectId: string }) {
+  const [project, setProject] = useState<Project | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     getProject(projectId)
-      .then((p) => setEnabled(p.auto_extract))
+      .then(setProject)
       .catch((err) => setError(errorText(err)));
   }, [projectId]);
 
-  async function handleChange(value: boolean) {
+  async function save(change: { auto_extract?: boolean; voice_language?: VoiceLanguage }) {
     setSaving(true);
     setError("");
     try {
-      setEnabled((await updateProject(projectId, { auto_extract: value })).auto_extract);
+      setProject(await updateProject(projectId, change));
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -263,21 +273,42 @@ function AutoExtractToggle({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="mt-2">
-      <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
-        <input
-          type="checkbox"
-          checked={enabled ?? false}
-          disabled={enabled === null || saving}
-          onChange={(e) => handleChange(e.target.checked)}
-          className="accent-indigo-500"
-        />
-        Auto-extract: find requirements in new auto-synced messages right away
-      </label>
-      <p className="mt-0.5 text-xs text-zinc-500">
-        The AI suggestions still wait for your review on the Requirements page.
-      </p>
-      {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
+    <div className="mt-2 flex flex-wrap items-start gap-x-8 gap-y-3">
+      <div>
+        <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={project?.auto_extract ?? false}
+            disabled={project === null || saving}
+            onChange={(e) => save({ auto_extract: e.target.checked })}
+            className="accent-indigo-500"
+          />
+          Auto-extract: find requirements in new auto-synced messages and voice notes right away
+        </label>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          The AI suggestions still wait for your review on the Requirements page.
+        </p>
+      </div>
+      <div>
+        <label className="inline-flex items-center gap-2 text-sm text-zinc-300" htmlFor="voice-language">
+          <span aria-hidden>🎤</span> Voice language
+          <select
+            id="voice-language"
+            value={project?.voice_language ?? "auto"}
+            disabled={project === null || saving}
+            onChange={(e) => save({ voice_language: e.target.value as VoiceLanguage })}
+            className={`${inputClass} w-auto py-1`}
+          >
+            {VOICE_LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="mt-0.5 text-xs text-zinc-500">Auto detects the language of each voice note.</p>
+      </div>
+      {error && <p className="w-full text-xs text-rose-300">{error}</p>}
     </div>
   );
 }
@@ -289,6 +320,9 @@ function UploadResultCard({ result }: { result: UploadResult }) {
         <Stat label="imported" value={result.imported} className="text-emerald-300" />
         <Stat label="duplicates" value={result.duplicates} className="text-amber-300" />
         <Stat label="skipped" value={result.skipped} className="text-zinc-300" />
+        {result.voice_queued + result.voice_skipped > 0 && (
+          <Stat label="voice notes queued" value={result.voice_queued} className="text-orange-300" />
+        )}
         {result.imported > 0 && (
           <Link href="/messages" className="ml-auto text-sm text-indigo-300 hover:text-indigo-200">
             View messages →
@@ -305,6 +339,8 @@ function UploadResultCard({ result }: { result: UploadResult }) {
             ) : (
               <span className="ml-auto text-xs tabular-nums text-zinc-400">
                 {f.imported} imported · {f.duplicates} duplicates · {f.skipped} skipped
+                {f.voice_queued > 0 && ` · 🎤 ${f.voice_queued} to transcribe`}
+                {f.voice_skipped > 0 && ` · ${f.voice_skipped} voice notes cannot be transcribed`}
               </span>
             )}
           </li>
@@ -312,6 +348,8 @@ function UploadResultCard({ result }: { result: UploadResult }) {
       </ul>
       <p className="mt-3 text-xs text-zinc-500">
         Skipped = system lines, media placeholders, headings and other lines that are not client messages.
+        {result.voice_queued + result.voice_skipped > 0 &&
+          " Voice notes are transcribed in the background; their transcripts appear on the Messages page."}
       </p>
     </div>
   );

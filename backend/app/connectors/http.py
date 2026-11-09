@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.connectors.base import Connector, NormalizedMessage
+from app.connectors.base import MAX_AUDIO_BYTES, AudioAttachment, Connector, NormalizedMessage
 
 # httpx logs every request URL at INFO level; Telegram URLs contain the bot token
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -40,6 +40,14 @@ class NotConfiguredError(ConnectorError):
 
 class NeedsAuthError(ConnectorError):
     """The account has to be connected (again), e.g. Gmail OAuth."""
+
+
+class AudioTooLargeError(ConnectorError):
+    """The audio file is larger than MAX_AUDIO_BYTES; it is not downloaded."""
+
+
+class NotAudioError(ConnectorError):
+    """The download returned something else (e.g. a sign-in web page) instead of the audio file."""
 
 
 class ApiConnector(Connector):
@@ -70,6 +78,14 @@ class ApiConnector(Connector):
 
     def fetch(self, since: datetime | None = None) -> list[NormalizedMessage]:
         raise NotImplementedError
+
+    def download_audio(self, attachment: AudioAttachment) -> bytes:
+        """Default: GET the attachment's URL. Connectors that need auth or another API call override this."""
+        if attachment.data is not None:
+            return attachment.data
+        if not attachment.url:
+            raise ConnectorError(f"{self.label} gave no download address for this voice note.")
+        return download(self.client, attachment.url, service=self.label)
 
 
 def _retry_after(response: httpx.Response) -> float:
@@ -120,9 +136,15 @@ def send(
             raise ConnectorError(f"{service} rate limit reached. Try again in a few minutes.")
         sleep(wait)
 
-    status = response.status_code
-    if status in allow_status:
+    if response.status_code in allow_status:
         return response
+    check_status(response, service, auth_hint)
+    return response
+
+
+def check_status(response: httpx.Response, service: str, auth_hint: str = "") -> None:
+    """Raise ConnectorError with a clear message for an error status."""
+    status = response.status_code
     hint = f" {auth_hint}" if auth_hint else ""
     if status == 401:
         raise ConnectorError(f"{service} rejected the credentials (HTTP 401).{hint}")
@@ -132,7 +154,52 @@ def send(
         raise ConnectorError(f"{service} could not find the requested item (HTTP 404). Check the source settings.")
     if status >= 400:
         raise ConnectorError(f"{service} returned an error (HTTP {status}).")
-    return response
+
+
+def download(
+    client: httpx.Client,
+    url: str,
+    *,
+    service: str,
+    auth_hint: str = "",
+    max_bytes: int = MAX_AUDIO_BYTES,
+    **kwargs: Any,
+) -> bytes:
+    """Download a file, streamed and cut off at `max_bytes` (AudioTooLargeError). Retries on 429 like send().
+
+    A web page (text/html) instead of the file raises NotAudioError: services answer with a sign-in page when the
+    token may not read files. The URL is never put in an error message.
+    """
+    kwargs.setdefault("follow_redirects", True)
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            with client.stream("GET", url, **kwargs) as response:
+                if response.status_code == 429:
+                    response.read()
+                    wait = _retry_after(response)
+                    if attempt == MAX_RETRIES or wait > MAX_WAIT_SECONDS:
+                        raise ConnectorError(f"{service} rate limit reached. Try again in a few minutes.")
+                    sleep(wait)
+                    continue
+                check_status(response, service, auth_hint)
+                if response.headers.get("content-type", "").lower().startswith("text/html"):
+                    raise NotAudioError(f"{service} returned a web page instead of the audio file.")
+                length = response.headers.get("content-length")
+                if length and length.isdigit() and int(length) > max_bytes:
+                    raise AudioTooLargeError(f"The audio file is larger than {max_bytes // (1024 * 1024)} MB.")
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise AudioTooLargeError(f"The audio file is larger than {max_bytes // (1024 * 1024)} MB.")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.TimeoutException:
+            raise ConnectorError(f"{service} did not answer in time. Try again later.") from None
+        except httpx.HTTPError:
+            raise ConnectorError(f"Could not reach {service}. Check the internet connection and settings.") from None
+    raise ConnectorError(f"{service} rate limit reached. Try again in a few minutes.")
 
 
 def json_body(response: httpx.Response, service: str) -> Any:

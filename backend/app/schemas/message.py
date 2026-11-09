@@ -5,8 +5,41 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from app.schemas.common import UtcDatetime
 
 
+class VoiceInfo(BaseModel):
+    """What the Messages page shows about a voice note (from Message.raw["voice"])."""
+
+    filename: str | None = None
+    duration: float | None = None
+    # Final language of the transcript ("bangla", "english", else Whisper's name) and the model that wrote it
+    language: str | None = None
+    model: str | None = None
+    # "auto", "bn" or "en"; what Whisper detected first (e.g. "hindi"); whether it was transcribed again as Bangla
+    requested_language: str | None = None
+    detected_language: str | None = None
+    retried: bool = False
+    retry_reason: str | None = None
+    # Earlier transcripts kept in raw["voice"]["history"] (Re-transcribe)
+    previous_transcripts: int = 0
+
+    @classmethod
+    def of(cls, raw: dict | None) -> "VoiceInfo | None":
+        voice = (raw or {}).get("voice")
+        if not isinstance(voice, dict):
+            return None
+        keys = ("filename", "duration", "language", "model", "requested_language", "detected_language",
+                "retry_reason")
+        values = {k: voice.get(k) for k in keys}
+        return cls.model_validate(
+            {**values, "retried": bool(voice.get("retried")), "previous_transcripts": len(voice.get("history") or [])}
+        )
+
+
 class MessageOut(BaseModel):
-    """A message in lists. `raw` is left out to keep pages small."""
+    """A message in lists. `raw` is left out to keep pages small.
+
+    Voice notes have kind "voice" and their transcript as `text`. transcript_status: pending | transcribing |
+    done | failed (Retry) | skipped (cannot be transcribed; the reason is in transcript_error).
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -19,6 +52,18 @@ class MessageOut(BaseModel):
     sent_at: UtcDatetime
     text: str
     imported_at: UtcDatetime
+    kind: str = "text"
+    transcript_status: str | None = None
+    transcript_error: str | None = None
+    # The audio is stored (KEEP_AUDIO, or not transcribed yet): the page can play it
+    has_audio: bool = False
+    # Re-transcribe as Bangla / English is possible: the audio is stored or the connector can download it again
+    can_retranscribe: bool = False
+    voice: VoiceInfo | None = None
+
+
+class RetranscribeRequest(BaseModel):
+    language: Literal["bn", "en"]
 
 
 class MessagePage(BaseModel):
@@ -97,6 +142,7 @@ class SourceStatus(BaseModel):
 class SyncResult(BaseModel):
     imported: int
     duplicates: int
+    voice_queued: int = 0
     sync_status: str
     last_synced_at: UtcDatetime | None
 
@@ -111,6 +157,9 @@ class FileImportResult(BaseModel):
     imported: int = 0
     duplicates: int = 0
     skipped: int = 0
+    # New voice notes: waiting for transcription, and ones that cannot be transcribed (reason on the message)
+    voice_queued: int = 0
+    voice_skipped: int = 0
     error: str | None = None
 
 
@@ -118,4 +167,6 @@ class UploadResult(BaseModel):
     imported: int
     duplicates: int
     skipped: int
+    voice_queued: int = 0
+    voice_skipped: int = 0
     files: list[FileImportResult]

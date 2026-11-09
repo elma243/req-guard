@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     # backend worker; set False for tests and for deploys with several workers or instances.
     auto_sync_enabled: bool = True
 
+    # Voice notes (app/ai/speech.py): Groq Whisper with GROQ_API_KEY. The transcription worker is a background task
+    # in the API process like auto-sync (one backend worker); set False for tests.
+    transcription_worker_enabled: bool = True
+    whisper_model: str = "whisper-large-v3"
+    whisper_fallback_model: str = "whisper-large-v3-turbo"
+    # Groq's free limit for audio models is 20 requests per minute
+    groq_audio_rpm: int = 20
+    # Languages voice notes are expected in (codes). In Auto mode a note Whisper hears as another language (Hindi,
+    # Urdu, Nepali, Assamese...) or writes in Devanagari is transcribed again as Bangla.
+    voice_allowed_languages: str = "bn,en"
+    # Keep the audio after transcription (playable on the Messages page). False deletes it once transcribed.
+    keep_audio: bool = False
+
     # Connectors
     jira_base_url: str | None = None
     jira_email: str | None = None

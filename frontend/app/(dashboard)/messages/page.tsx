@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import NoProjectSelected from "@/components/NoProjectSelected";
 import SourceBadge, { sourceLabel } from "@/components/SourceBadge";
+import VoiceNote from "@/components/VoiceNote";
 import { ErrorBanner, NoticeBanner, errorText, inputClass, primaryButton, secondaryButton } from "@/components/ui";
 import {
   MESSAGE_SOURCES,
@@ -22,6 +23,8 @@ import { useSelectedProject } from "@/lib/selectedProject";
 
 const PAGE_SIZE = 50;
 const SEARCH_DELAY_MS = 350;
+// While voice notes on the page wait for transcription, the page is refreshed this often
+const VOICE_REFRESH_MS = 5000;
 // Filters kept in the URL, so a filtered view can be reloaded or shared
 const FILTER_KEYS = ["source", "author", "q", "date_from", "date_to"] as const;
 
@@ -107,6 +110,21 @@ function MessagesView({ projectId }: { projectId: string }) {
 
   const loading = result?.key !== queryKey;
   const data = result?.data;
+  const waitingForVoice = !!data?.items.some(
+    (m) => m.transcript_status === "pending" || m.transcript_status === "transcribing",
+  );
+
+  // Quietly fetch the page again while voice notes are being transcribed, so transcripts appear on their own
+  useEffect(() => {
+    if (!waitingForVoice || loading) return;
+    const timer = setTimeout(() => {
+      listMessages(projectId, filters)
+        .then((fresh) => setResult((prev) => (prev?.key === queryKey ? { key: queryKey, data: fresh } : prev)))
+        .catch(() => undefined);
+    }, VOICE_REFRESH_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- queryKey covers projectId and all filters
+  }, [waitingForVoice, loading, queryKey, data]);
   const hasFilters = FILTER_KEYS.some((k) => searchParams.get(k));
 
   function clearFilters() {
@@ -116,7 +134,8 @@ function MessagesView({ projectId }: { projectId: string }) {
   }
 
   async function handleDelete(m: Message) {
-    const preview = m.text.length > 80 ? `${m.text.slice(0, 80)}...` : m.text;
+    const text = m.kind === "voice" && !m.text ? `Voice note ${m.voice?.filename ?? ""}`.trim() : m.text;
+    const preview = text.length > 80 ? `${text.slice(0, 80)}...` : text;
     if (!confirm(`Delete this message permanently? This cannot be undone.\n\n"${preview}"`)) return;
     setDeletingId(m.id);
     setDeleteError("");
@@ -270,14 +289,16 @@ function MessagesView({ projectId }: { projectId: string }) {
                   </td>
                   <td className="px-4 py-3 text-zinc-200">{m.author || <span className="text-zinc-600">—</span>}</td>
                   <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      onClick={() => toggle(m.id)}
-                      title={open ? "Click to collapse" : "Click to show all"}
-                      className={`w-full cursor-pointer whitespace-pre-line text-left text-zinc-100 ${open ? "" : "line-clamp-3"}`}
-                    >
-                      {m.text}
-                    </button>
+                    {m.kind === "voice" ? (
+                      <VoiceNote
+                        projectId={projectId}
+                        message={m}
+                        transcript={<ExpandableText text={m.text} open={open} onToggle={() => toggle(m.id)} />}
+                        onRetried={() => setReload((n) => n + 1)}
+                      />
+                    ) : (
+                      <ExpandableText text={m.text} open={open} onToggle={() => toggle(m.id)} />
+                    )}
                   </td>
                   <td className="px-2 py-3 text-right">
                     <button
@@ -307,6 +328,19 @@ function MessagesView({ projectId }: { projectId: string }) {
         />
       )}
     </>
+  );
+}
+
+function ExpandableText({ text, open, onToggle }: { text: string; open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={open ? "Click to collapse" : "Click to show all"}
+      className={`w-full cursor-pointer whitespace-pre-line text-left text-zinc-100 ${open ? "" : "line-clamp-3"}`}
+    >
+      {text}
+    </button>
   );
 }
 

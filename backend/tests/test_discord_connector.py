@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+from app.connectors.base import AudioAttachment
 from app.connectors.discord import API, DiscordConnector, DiscordSettings
 from app.connectors.http import ConnectorError
 from tests.conftest import api_json
@@ -107,3 +108,64 @@ def test_bot_without_access():
     respx.get(f"{API}/guilds/{GUILD}/channels").respond(403, json={"message": "Missing Access", "code": 50001})
     with make_connector() as connector, pytest.raises(ConnectorError, match="DISCORD_BOT_TOKEN"):
         connector.fetch()
+
+
+# ---------- Voice notes ----------
+
+CDN = "https://cdn.discordapp.com/attachments/1290000000000000010"
+
+
+def _message(message_id: str, content: str = "", flags: int = 0, attachments: list | None = None) -> dict:
+    return {
+        "id": message_id,
+        "type": 0,
+        "content": content,
+        "flags": flags,
+        "timestamp": "2026-10-20T10:00:00+00:00",
+        "author": {"id": "1", "username": "karim"},
+        "attachments": attachments or [],
+    }
+
+
+@respx.mock
+def test_voice_messages_and_audio_attachments():
+    respx.get(f"{API}/guilds/{GUILD}/channels").respond(json=api_json("discord/guild_channels.json"))
+    page = [
+        _message("1300000000000000001", flags=8192, attachments=[
+            {"id": "11", "filename": "voice-message.ogg", "content_type": "audio/ogg", "size": 9000,
+             "duration_secs": 5.5, "url": f"{CDN}/11/voice-message.ogg?ex=1"},
+        ]),
+        _message("1300000000000000002", content="Brief attached", attachments=[
+            {"id": "12", "filename": "brief.m4a", "size": 50000, "url": f"{CDN}/12/brief.m4a"},
+            {"id": "13", "filename": "screen.png", "content_type": "image/png", "url": f"{CDN}/13/screen.png"},
+        ]),
+    ]
+    respx.get(f"{API}/channels/{ACME}/messages").respond(json=page)
+    with make_connector(channels=["client-acme"]) as connector:
+        messages = connector.fetch()
+
+    assert [(m.kind, m.external_id) for m in messages] == [
+        ("voice", "1300000000000000001:audio:11"),
+        ("text", "1300000000000000002"),
+        ("voice", "1300000000000000002:audio:12"),
+    ]
+    voice = messages[0].audio
+    assert (voice.mime_type, voice.duration, voice.ref["voice_message"]) == ("audio/ogg", 5.5, True)
+    assert messages[2].audio.mime_type == "audio/mp4"
+
+
+@respx.mock
+def test_download_audio_refreshes_an_expired_url():
+    expired = f"{CDN}/11/voice-message.ogg?ex=old"
+    fresh = f"{CDN}/11/voice-message.ogg?ex=new"
+    respx.get(expired).respond(404)
+    respx.get(f"{API}/channels/{ACME}/messages/1300000000000000001").respond(
+        json=_message("1300000000000000001", attachments=[{"id": "11", "url": fresh}])
+    )
+    respx.get(fresh).respond(content=b"fake-ogg", headers={"content-type": "audio/ogg"})
+    attachment = AudioAttachment(
+        file_id="11", filename="voice-message.ogg", mime_type="audio/ogg", url=expired,
+        ref={"channel_id": ACME, "message_id": "1300000000000000001"},
+    )
+    with make_connector() as connector:
+        assert connector.download_audio(attachment) == b"fake-ogg"

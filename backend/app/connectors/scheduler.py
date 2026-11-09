@@ -51,6 +51,41 @@ def optional_llm() -> LLMClient | None:
         return None
 
 
+def run_auto_extract(
+    db: Session, project_id: int, message_ids: list[int], llm_factory: Callable[[], LLMClient | None]
+) -> None:
+    """Extract and validate requirements from these messages only, if the project asks for it (auto-extract).
+
+    Used after an auto-sync and after voice notes are transcribed. A failure is logged and does not count as a
+    failed sync; the messages stay unread for the Extract button. Voice messages not transcribed yet are left for
+    the transcription worker (extraction skips them).
+    """
+    project = db.get(Project, project_id)
+    if project is None or not project.auto_extract:
+        return
+    try:
+        llm = llm_factory()
+        result = extract_requirements(
+            db,
+            project,
+            llm,
+            only_message_ids=message_ids,
+            llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
+        )
+        validate_project(db, project, only_new=True, llm=llm)
+        db.commit()
+        logger.info(
+            "auto-extract project=%d messages=%d requirements=%d remaining=%d",
+            project_id,
+            result.messages_processed,
+            result.requirements_created,
+            result.messages_remaining,
+        )
+    except Exception:
+        logger.exception("auto-extract project=%d failed", project_id)
+        db.rollback()
+
+
 def spread_offset(source_id: int, interval_minutes: int) -> timedelta:
     """Where in its interval this source runs, so sources with the same interval do not start together."""
     return timedelta(seconds=(source_id * SPREAD_STEP_SECONDS) % (interval_minutes * 60))
@@ -161,35 +196,7 @@ class AutoSyncScheduler:
         return True
 
     def _auto_extract(self, db: Session, project_id: int, message_ids: list[int]) -> None:
-        """Extract and validate requirements from the new messages only, if the project asks for it.
-
-        Runs after the source's lock is released. A failure is logged and does not count as a failed sync;
-        the messages stay unread for the Extract button.
-        """
-        project = db.get(Project, project_id)
-        if project is None or not project.auto_extract:
-            return
-        try:
-            llm = self.llm_factory()
-            result = extract_requirements(
-                db,
-                project,
-                llm,
-                only_message_ids=message_ids,
-                llm_unavailable_reason=None if llm else NO_LLM_CONFIGURED,
-            )
-            validate_project(db, project, only_new=True, llm=llm)
-            db.commit()
-            logger.info(
-                "auto-extract project=%d messages=%d requirements=%d remaining=%d",
-                project_id,
-                result.messages_processed,
-                result.requirements_created,
-                result.messages_remaining,
-            )
-        except Exception:
-            logger.exception("auto-extract project=%d failed", project_id)
-            db.rollback()
+        run_auto_extract(db, project_id, message_ids, self.llm_factory)
 
     @staticmethod
     def _set_next_run(db: Session, source_id: int, when: datetime) -> None:

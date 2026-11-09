@@ -27,12 +27,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.ai.llm import LLMClient, LLMError, LLMUnavailableError, now, thinking_level
 from app.core.config import settings
 from app.models import Message, Project, Requirement, RequirementSource, RequirementVersion
+from app.models.message import KIND_TEXT, TRANSCRIPT_DONE
 from app.models.requirement import requirement_code
 from app.schemas.extraction import ExtractedRequirement, ExtractionAnswer, ExtractResult
 
@@ -384,7 +385,9 @@ def extract_requirements(
     RUN_TIME_BUDGET_SECONDS; rule-based batches need no time.
 
     `only_message_ids` limits the run to those messages, if not read yet (auto-extract after an auto-sync);
-    other unread messages wait for a normal run.
+    other unread messages wait for a normal run. `message_ids` also limits the run to those messages: reading one
+    message again (Re-transcribe) must not pick up the project's other unread messages, which auto-extract may be
+    reading at the same time.
     """
     if force or message_ids is not None:
         # Mark the chosen messages as unread, so a run stopped by the per-run limit continues with a normal run
@@ -394,9 +397,16 @@ def extract_requirements(
         db.execute(reset.values(requirements_extracted_at=None))
         db.commit()
 
-    pending = [Message.project_id == project.id, Message.requirements_extracted_at.is_(None)]
+    pending = [
+        Message.project_id == project.id,
+        Message.requirements_extracted_at.is_(None),
+        # Voice messages are read once they are transcribed
+        or_(Message.kind == KIND_TEXT, Message.transcript_status == TRANSCRIPT_DONE),
+    ]
     if only_message_ids is not None:
         pending.append(Message.id.in_(only_message_ids))
+    if message_ids is not None:
+        pending.append(Message.id.in_(message_ids))
     total = db.scalar(select(func.count()).select_from(Message).where(*pending)) or 0
     messages = db.scalars(
         select(Message).where(*pending).order_by(Message.sent_at, Message.id).limit(MAX_MESSAGES_PER_RUN)

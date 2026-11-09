@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 import respx
 
+from app.connectors.base import AudioAttachment
 from app.connectors.http import ConnectorError
 from app.connectors.telegram import TelegramConnector, TelegramSettings
 from tests.conftest import api_json
@@ -97,3 +98,72 @@ def test_wrong_token_message_does_not_contain_token():
     with make_connector() as connector, pytest.raises(ConnectorError, match="TELEGRAM_BOT_TOKEN") as exc:
         connector.fetch()
     assert TOKEN not in str(exc.value)
+
+
+# ---------- Voice notes ----------
+
+FILE_URL = f"https://api.telegram.org/file/bot{TOKEN}"
+
+
+def _update(update_id: int, **content) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id,
+            "date": 1792656000,
+            "chat": {"id": -100, "title": "Acme project", "type": "supergroup"},
+            "from": {"first_name": "Karim"},
+            **content,
+        },
+    }
+
+
+@respx.mock
+def test_voice_audio_and_audio_documents_become_voice_messages():
+    updates = [
+        _update(1, voice={"file_id": "VOICE1", "file_unique_id": "u1", "duration": 7, "mime_type": "audio/ogg",
+                          "file_size": 12000}),
+        _update(2, caption="See the clip", audio={"file_id": "AUD2", "file_name": "brief.m4a",
+                                                  "mime_type": "audio/mp4", "duration": 30}),
+        _update(3, document={"file_id": "DOC3", "file_name": "spec.pdf", "mime_type": "application/pdf"}),
+        _update(4, document={"file_id": "DOC4", "file_name": "call.mp3", "mime_type": "audio/mpeg"}),
+        _update(5, voice={"file_id": "BIG5", "file_size": 21 * 1024 * 1024}),
+    ]
+    respx.get(URL).respond(json={"ok": True, "result": updates})
+    with make_connector() as connector:
+        messages = connector.fetch()
+
+    voice = [m for m in messages if m.kind == "voice"]
+    assert [m.external_id for m in voice] == [
+        "-100:1:audio:VOICE1", "-100:2:audio:AUD2", "-100:4:audio:DOC4", "-100:5:audio:BIG5"
+    ]
+    assert [m.text for m in messages if m.kind == "text"] == ["See the clip"]  # the caption stays a text message
+    first = voice[0]
+    assert (first.audio.filename, first.audio.mime_type, first.audio.duration, first.author) == (
+        "voice-1.ogg", "audio/ogg", 7, "Karim"
+    )
+    assert first.raw["parent_external_id"] == "-100:1"
+    assert voice[3].audio.skip_reason is not None and "20 MB" in voice[3].audio.skip_reason
+    assert TOKEN not in str([m.model_dump() for m in messages])
+
+
+@respx.mock
+def test_download_audio_uses_get_file():
+    get_file = respx.get(f"https://api.telegram.org/bot{TOKEN}/getFile").respond(
+        json={"ok": True, "result": {"file_id": "VOICE1", "file_path": "voice/file_7.oga"}}
+    )
+    respx.get(f"{FILE_URL}/voice/file_7.oga").respond(content=b"fake-ogg", headers={"content-type": "audio/ogg"})
+    with make_connector() as connector:
+        data = connector.download_audio(AudioAttachment(file_id="VOICE1", filename="v.ogg", mime_type="audio/ogg"))
+    assert data == b"fake-ogg"
+    assert get_file.calls[0].request.url.params["file_id"] == "VOICE1"
+
+
+@respx.mock
+def test_download_audio_too_big_for_bots():
+    respx.get(f"https://api.telegram.org/bot{TOKEN}/getFile").respond(
+        400, json={"ok": False, "description": "Bad Request: file is too big"}
+    )
+    with make_connector() as connector, pytest.raises(ConnectorError) as exc:
+        connector.download_audio(AudioAttachment(file_id="X", filename="v.ogg", mime_type="audio/ogg"))
+    assert "20 MB" in str(exc.value) and TOKEN not in str(exc.value)

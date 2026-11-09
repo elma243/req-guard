@@ -11,6 +11,9 @@ os.environ["PROXY_SHARED_SECRET"] = ""
 os.environ["SMTP_HOST"] = ""
 # No background scheduler in tests; test_auto_sync.py drives it with a fake clock
 os.environ["AUTO_SYNC_ENABLED"] = "false"
+# No background transcription worker either; test_speech.py drives it directly. Audio is never kept by default.
+os.environ["TRANSCRIPTION_WORKER_ENABLED"] = "false"
+os.environ["KEEP_AUDIO"] = "false"
 
 import itertools  # noqa: E402
 import json  # noqa: E402
@@ -27,7 +30,7 @@ import app.models  # noqa: E402, F401  (registers models on Base.metadata)
 from app.core.db import Base, get_db  # noqa: E402
 from app.api.deps import get_optional_llm_client  # noqa: E402
 from app.main import app  # noqa: E402
-from app.ai import llm  # noqa: E402
+from app.ai import llm, speech  # noqa: E402
 from app.connectors import http as connector_http  # noqa: E402
 from app.core import email as mailer  # noqa: E402
 from app.core.config import settings  # noqa: E402
@@ -49,6 +52,8 @@ def no_retry_wait(monkeypatch):
     """Rate-limit retries in connectors and the LLM client do not really sleep in tests."""
     monkeypatch.setattr(connector_http, "sleep", lambda seconds: None)
     monkeypatch.setattr(llm, "sleep", lambda seconds: None)
+    monkeypatch.setattr(speech, "sleep", lambda seconds: None)
+    speech.limiter.reset()
 
 
 @pytest.fixture(autouse=True)

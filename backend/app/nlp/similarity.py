@@ -98,11 +98,25 @@ def get_embedder() -> Embedder:
     return _embedder.get()
 
 
+def existing_version_ids(db: Session, ids: Sequence[int]) -> set[int]:
+    """Which of these requirement versions are still in the database."""
+    found: set[int] = set()
+    unique = list(dict.fromkeys(ids))
+    for chunk in (unique[i : i + 500] for i in range(0, len(unique), 500)):
+        found.update(db.scalars(select(RequirementVersion.id).where(RequirementVersion.id.in_(chunk))))
+    return found
+
+
 def ensure_embeddings(db: Session, embedder: Embedder, versions: Sequence[RequirementVersion]) -> dict[int, np.ndarray]:
     """The embedding of each version's statement by version id. Missing ones are made in one batch and stored.
 
-    The caller commits. Versions never change, so a stored embedding is never made again.
+    The caller commits. Versions never change, so a stored embedding is never made again. Versions that are no
+    longer in the database (deleted by another extraction since they were loaded) are skipped and left out of
+    the result, so no embedding is written for them.
     """
+    db.flush()
+    existing = existing_version_ids(db, [v.id for v in versions])
+    versions = [v for v in versions if v.id in existing]
     ids = [v.id for v in versions]
     stored: dict[int, list[float]] = {}
     for chunk in (ids[i : i + 500] for i in range(0, len(ids), 500)):  # keep the IN list short

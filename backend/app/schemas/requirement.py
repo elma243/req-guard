@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.schemas.common import UtcDatetime
+from app.schemas.message import VoiceInfo
 from app.schemas.extraction import NfrCategory
 
 RequirementType = Literal["functional", "non_functional"]
@@ -44,11 +45,16 @@ class RequirementSourceOut(BaseModel):
     sent_at: UtcDatetime
     # The requirement this sentence came from through a merge; None for its own sentences
     merged_from_id: int | None
+    # "voice" when the sentence comes from a transcribed voice note
+    message_kind: str = "text"
 
 
 class RequirementSourceDetail(RequirementSourceOut):
     # The whole message, to show the sentence in its context
     message_text: str
+    # Voice notes: the audio can be played (it was kept), and file/duration/language
+    has_audio: bool = False
+    voice: VoiceInfo | None = None
 
 
 class FailedCriterion(BaseModel):

@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+from app.connectors.base import AudioAttachment
 from app.connectors.http import ConnectorError
 from app.connectors.jira import JiraConnector, JiraSettings, adf_to_text
 from tests.conftest import api_json
@@ -201,3 +202,64 @@ def test_unknown_project_gives_clear_error():
     )
     with make_connector("NOPE") as connector, pytest.raises(ConnectorError, match="HTTP 400"):
         connector.fetch()
+
+
+# ---------- Voice notes ----------
+
+CONTENT = f"{BASE}/rest/api/3/attachment/content/10001"
+
+
+def _issue_with_audio() -> dict:
+    return {
+        "id": "20001",
+        "key": "ACME-9",
+        "fields": {
+            "summary": "Checkout",
+            "created": "2026-10-20T10:00:00.000+0600",
+            "reporter": {"displayName": "Karim"},
+            "attachment": [
+                {"id": "10001", "filename": "checkout-note.m4a", "mimeType": "audio/x-m4a", "size": 5000,
+                 "created": "2026-10-21T09:00:00.000+0600", "author": {"displayName": "Rina"}, "content": CONTENT},
+                {"id": "10002", "filename": "brief.ogg", "mimeType": "application/octet-stream", "size": 7000,
+                 "created": "2026-10-20T10:05:00.000+0600", "author": {"displayName": "Karim"},
+                 "content": f"{BASE}/rest/api/3/attachment/content/10002"},
+                {"id": "10003", "filename": "screen.png", "mimeType": "image/png"},
+            ],
+        },
+    }
+
+
+@respx.mock
+def test_audio_attachments_on_issues_and_comments():
+    respx.get(f"{BASE}/rest/api/3/search/jql").respond(json={"issues": [_issue_with_audio()], "isLast": True})
+    comment = {
+        "id": "30001",
+        "author": {"displayName": "Rina"},
+        "created": "2026-10-21T09:00:00.000+0600",
+        "body": {"type": "doc", "version": 1, "content": [
+            {"type": "mediaSingle", "content": [
+                {"type": "media", "attrs": {"id": "uuid", "type": "file", "collection": "", "alt": "checkout-note.m4a"}}
+            ]},
+        ]},
+    }
+    respx.get(f"{BASE}/rest/api/3/issue/ACME-9/comment").respond(json={"comments": [comment], "total": 1})
+    with make_connector() as connector:
+        messages = connector.fetch()
+
+    voice = [m for m in messages if m.kind == "voice"]
+    assert [m.external_id for m in voice] == ["issue:20001:audio:10002", "issue:20001:audio:10001"]
+    on_comment = voice[1]
+    assert on_comment.raw["comment_id"] == "30001"
+    assert (on_comment.author, on_comment.audio.url, on_comment.audio.mime_type) == ("Rina", CONTENT, "audio/x-m4a")
+    assert "comment_id" not in voice[0].raw  # shown on no comment: belongs to the issue
+    assert voice[0].audio.mime_type == "audio/ogg"
+
+
+@respx.mock
+def test_download_audio_with_the_api_token():
+    route = respx.get(CONTENT).respond(302, headers={"Location": "https://api.media.atlassian.com/file/x/binary"})
+    respx.get("https://api.media.atlassian.com/file/x/binary").respond(content=b"fake-m4a")
+    attachment = AudioAttachment(file_id="10001", filename="n.m4a", mime_type="audio/mp4", url=CONTENT)
+    with make_connector() as connector:
+        assert connector.download_audio(attachment) == b"fake-m4a"
+    assert route.calls[0].request.headers["Authorization"].startswith("Basic ")

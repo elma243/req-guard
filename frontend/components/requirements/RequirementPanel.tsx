@@ -1,6 +1,7 @@
 "use client";
 
 import { ErrorBanner, secondaryButton } from "@/components/ui";
+import { VoicePlayer } from "@/components/VoiceNote";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
@@ -19,6 +20,7 @@ import {
 export type DetailState = { data?: RequirementDetail; error?: string } | null;
 
 export default function RequirementPanel({
+  projectId,
   requirement: r,
   detail,
   codes,
@@ -30,6 +32,7 @@ export default function RequirementPanel({
   onOpenRequirement,
   onMergeInto,
 }: {
+  projectId: string;
   requirement: Requirement;
   detail: DetailState;
   codes: Map<number, string>;
@@ -117,7 +120,7 @@ export default function RequirementPanel({
 
         <Section title="Source messages">
           {detail?.data ? (
-            <SourceMessages detail={detail.data} codes={codes} />
+            <SourceMessages projectId={projectId} detail={detail.data} codes={codes} />
           ) : (
             <Loading detail={detail} what="source messages" onRetry={onRetry} />
           )}
@@ -165,7 +168,15 @@ function Loading({ detail, what, onRetry }: { detail: DetailState; what: string;
   );
 }
 
-function SourceMessages({ detail, codes }: { detail: RequirementDetail; codes: Map<number, string> }) {
+function SourceMessages({
+  projectId,
+  detail,
+  codes,
+}: {
+  projectId: string;
+  detail: RequirementDetail;
+  codes: Map<number, string>;
+}) {
   if (detail.sources.length === 0) return <p className="text-sm text-zinc-500">Source message was deleted.</p>;
   return (
     <ul className="space-y-3">
@@ -174,6 +185,7 @@ function SourceMessages({ detail, codes }: { detail: RequirementDetail; codes: M
           <div className="max-h-48 overflow-y-auto">
             <HighlightedMessage text={s.message_text} sentence={s.source_sentence} />
           </div>
+          {s.has_audio && <VoicePlayer projectId={projectId} messageId={s.message_id} />}
           <div className="mt-2">
             <SourceLine source={s} />
           </div>

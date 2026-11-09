@@ -1,8 +1,10 @@
-"""Parsers for uploaded files (no network): .eml emails and .txt/.md meeting notes.
+"""Parsers for uploaded files (no network): .eml emails (with their audio attachments as voice notes) and
+.txt/.md meeting notes.
 
 Also decides which parser an uploaded file needs (`detect_type`, `connector_for_upload`).
 """
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -14,16 +16,25 @@ from html.parser import HTMLParser
 from pathlib import PurePath
 
 from app.connectors.base import (
+    AudioAttachment,
     FileConnector,
     NormalizedMessage,
     OccurrenceCounter,
     ParseResult,
     as_utc,
+    audio_mime,
     decode_text,
     stable_id,
+    voice_message,
 )
-from app.connectors.messenger_export import MessengerExportConnector, is_messenger_json
-from app.connectors.whatsapp_export import WhatsAppExportConnector, is_whatsapp_text
+from app.connectors.archive import ArchiveError, open_zip, read_text_member
+from app.connectors.messenger_export import (
+    MessengerExportConnector,
+    MessengerZipConnector,
+    is_messenger_json,
+    message_files,
+)
+from app.connectors.whatsapp_export import WhatsAppExportConnector, WhatsAppZipConnector, find_chat, is_whatsapp_text
 
 # ---------------------------------------------------------------------------
 # Email (.eml)
@@ -152,13 +163,32 @@ def _email_author(msg: EmailMessage) -> str:
     return str(header or "").strip()
 
 
+def email_audio(msg: EmailMessage) -> list[AudioAttachment]:
+    """Audio attachments of an email, with their bytes."""
+    found: list[AudioAttachment] = []
+    for index, part in enumerate(msg.iter_attachments()):
+        name = part.get_filename() or f"attachment-{index + 1}"
+        mime = audio_mime(name, part.get_content_type())
+        if mime is None:
+            continue
+        try:
+            data = part.get_payload(decode=True) or b""
+        except (LookupError, ValueError):
+            continue
+        found.append(
+            AudioAttachment(file_id=f"{index + 1}:{name}", filename=name, mime_type=mime, size=len(data), data=data)
+        )
+    return found
+
+
 def parse_eml(data: bytes, filename: str, now: datetime | None = None) -> ParseResult:
     msg = BytesParser(policy=policy.default).parsebytes(data)
     subject = " ".join(str(msg.get("Subject") or "").split())
     original_body = _email_body(msg)
     body = clean_email_body(original_body)
+    audio = email_audio(msg)
     result = ParseResult()
-    if not body and not subject:
+    if not body and not subject and not audio:
         result.skipped = 1
         return result
 
@@ -166,28 +196,33 @@ def parse_eml(data: bytes, filename: str, now: datetime | None = None) -> ParseR
     sent_at = _email_date(msg, now or datetime.now(timezone.utc))
     message_id = str(msg.get("Message-ID") or "").strip().strip("<>")
     text = f"{subject}\n\n{body}".strip() if subject else body
-
-    result.messages.append(
-        NormalizedMessage(
-            source=EMAIL_SOURCE,
-            external_id=message_id or stable_id(EMAIL_SOURCE, author, sent_at.isoformat(), subject, body),
-            channel=thread_subject(subject) or "(no subject)",
-            author=author,
-            sent_at=sent_at,
-            text=text,
-            raw={
-                "filename": filename,
-                "message_id": message_id,
-                "from": str(msg.get("From") or ""),
-                "to": str(msg.get("To") or ""),
-                "cc": str(msg.get("Cc") or ""),
-                "date": str(msg.get("Date") or ""),
-                "subject": subject,
-                "in_reply_to": str(msg.get("In-Reply-To") or ""),
-                "body": original_body,
-            },
+    external_id = message_id or stable_id(EMAIL_SOURCE, author, sent_at.isoformat(), subject, body)
+    channel = thread_subject(subject) or "(no subject)"
+    raw = {
+        "filename": filename,
+        "message_id": message_id,
+        "from": str(msg.get("From") or ""),
+        "to": str(msg.get("To") or ""),
+        "cc": str(msg.get("Cc") or ""),
+        "date": str(msg.get("Date") or ""),
+        "subject": subject,
+        "in_reply_to": str(msg.get("In-Reply-To") or ""),
+        "body": original_body,
+    }
+    if text:
+        result.messages.append(
+            NormalizedMessage(
+                source=EMAIL_SOURCE, external_id=external_id, channel=channel, author=author, sent_at=sent_at,
+                text=text, raw=raw,
+            )
         )
-    )
+    for attachment in audio:
+        result.messages.append(
+            voice_message(
+                source=EMAIL_SOURCE, parent_id=external_id, channel=channel, author=author, sent_at=sent_at,
+                attachment=attachment, raw=raw,
+            )
+        )
     return result
 
 
@@ -290,16 +325,73 @@ class MeetingNotesConnector(FileConnector):
 
 
 # ---------------------------------------------------------------------------
+# Voice note files (manual upload on the Sources page)
+# ---------------------------------------------------------------------------
+
+VOICE_SOURCE = "voice_upload"
+# Audio files the Sources page accepts
+VOICE_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".webm")
+
+
+class VoiceFileConnector(FileConnector):
+    """One uploaded audio file becomes one voice message. Its id is the hash of the audio, so uploading the same
+    file again is a duplicate."""
+
+    source = VOICE_SOURCE
+
+    def __init__(self, data: bytes, filename: str, now: datetime | None = None):
+        super().__init__(data, filename)
+        self.now = now
+
+    def parse(self) -> ParseResult:
+        digest = hashlib.sha1(self.data).hexdigest()
+        attachment = AudioAttachment(
+            file_id="file",
+            filename=self.filename,
+            mime_type=audio_mime(self.filename) or "audio/mpeg",
+            size=len(self.data),
+            data=self.data,
+        )
+        message = voice_message(
+            source=VOICE_SOURCE,
+            parent_id=digest,
+            channel="Voice notes",
+            author="",
+            sent_at=self.now or datetime.now(timezone.utc),
+            attachment=attachment,
+            raw={"filename": self.filename},
+        )
+        return ParseResult(messages=[message])
+
+
+# ---------------------------------------------------------------------------
 # Upload type detection
 # ---------------------------------------------------------------------------
 
 CONNECTORS: dict[str, type[FileConnector]] = {
     "whatsapp": WhatsAppExportConnector,
+    "whatsapp_zip": WhatsAppZipConnector,
     "messenger": MessengerExportConnector,
+    "messenger_zip": MessengerZipConnector,
     EMAIL_SOURCE: EmailFileConnector,
     NOTES_SOURCE: MeetingNotesConnector,
+    VOICE_SOURCE: VoiceFileConnector,
 }
-SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json")
+SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json", ".zip", *VOICE_EXTENSIONS)
+
+
+def zip_kind(data: bytes) -> str | None:
+    """whatsapp_zip / messenger_zip from the files inside, or None."""
+    try:
+        archive = open_zip(data)
+        if find_chat(archive) is not None:
+            return "whatsapp_zip"
+        for info in message_files(archive):
+            if is_messenger_json(json.loads(read_text_member(archive, info).decode("utf-8-sig"))):
+                return "messenger_zip"
+    except (ArchiveError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return None
 
 
 def detect_type(filename: str, data: bytes) -> str | None:
@@ -307,6 +399,10 @@ def detect_type(filename: str, data: bytes) -> str | None:
     ext = PurePath(filename).suffix.lower()
     if ext == ".eml":
         return EMAIL_SOURCE
+    if ext == ".zip":
+        return zip_kind(data)
+    if ext in VOICE_EXTENSIONS:
+        return VOICE_SOURCE
     if ext == ".json":
         try:
             return "messenger" if is_messenger_json(json.loads(data.decode("utf-8-sig"))) else None
