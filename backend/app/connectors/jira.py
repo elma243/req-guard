@@ -3,6 +3,10 @@
 Imports the issues of one project: each issue becomes one message (summary + description) and each
 comment becomes one message. Jira v3 returns rich text as Atlassian Document Format (ADF);
 `adf_to_text` turns it into plain text.
+
+Voice notes: every audio attachment of an issue becomes a voice message (Jira keeps comment attachments on the
+issue too). When a comment shows the file (an ADF media node with the file name), `raw["comment_id"]` links it to
+that comment. The audio is downloaded from the attachment's content URL with the API token.
 """
 
 import re
@@ -12,8 +16,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, field_validator
 
-from app.connectors.base import NormalizedMessage, as_utc
-from app.connectors.http import MAX_PAGES, ApiConnector, ConnectorError, json_body, send
+from app.connectors.base import AudioAttachment, NormalizedMessage, as_utc, audio_mime, voice_message
+from app.connectors.http import MAX_PAGES, ApiConnector, ConnectorError, download, json_body, send
 
 SOURCE = "jira"
 SERVICE = "Jira"
@@ -125,6 +129,19 @@ def _jira_date(value: str | None) -> datetime | None:
     return None
 
 
+def media_names(value: Any) -> set[str]:
+    """File names shown by ADF media nodes (their `alt`) anywhere in a document."""
+    names: set[str] = set()
+    if isinstance(value, dict):
+        if value.get("type") in ("media", "mediaInline"):
+            alt = (value.get("attrs") or {}).get("alt")
+            if alt:
+                names.add(str(alt))
+        for child in value.get("content") or []:
+            names |= media_names(child)
+    return names
+
+
 def _person(value: dict | None) -> str:
     value = value or {}
     return str(value.get("displayName") or value.get("emailAddress") or value.get("accountId") or "")
@@ -171,7 +188,7 @@ class JiraConnector(ApiConnector):
         jql += " ORDER BY created ASC"
         params: dict[str, Any] = {
             "jql": jql,
-            "fields": "summary,description,reporter,creator,created,updated",
+            "fields": "summary,description,reporter,creator,created,updated,attachment",
             "maxResults": PAGE_SIZE,
         }
         issues: list[dict] = []
@@ -196,6 +213,49 @@ class JiraConnector(ApiConnector):
                 break
         return comments
 
+    def _voice_messages(
+        self, issue: dict, key: str, issue_created: datetime, comments: list[dict]
+    ) -> list[NormalizedMessage]:
+        """One voice message per audio attachment, linked to the comment that shows it, if any."""
+        found: list[NormalizedMessage] = []
+        shown_in = {name: c for c in comments for name in media_names(c.get("body"))}
+        for item in (issue.get("fields") or {}).get("attachment") or []:
+            filename = str(item.get("filename") or "")
+            mime = audio_mime(filename, item.get("mimeType"))
+            if mime is None or not item.get("id"):
+                continue
+            comment = shown_in.get(filename)
+            attachment = AudioAttachment(
+                file_id=str(item["id"]),
+                filename=filename,
+                mime_type=mime,
+                size=item.get("size") if isinstance(item.get("size"), int) else None,
+                url=item.get("content"),
+            )
+            raw: dict[str, Any] = {"type": "attachment", "issue_key": key, "attachment": item}
+            if comment is not None:
+                raw["comment_id"] = comment.get("id")
+            found.append(
+                voice_message(
+                    source=SOURCE,
+                    # Always the issue: the id stays the same if a comment shows the file later
+                    parent_id=f"issue:{issue['id']}",
+                    channel=key,
+                    author=_person(item.get("author") or (comment or {}).get("author")),
+                    sent_at=_jira_date(item.get("created")) or issue_created,
+                    attachment=attachment,
+                    raw=raw,
+                )
+            )
+        return found
+
+    def download_audio(self, attachment: AudioAttachment) -> bytes:
+        """The attachment's content URL with the API token (Jira redirects to its media service)."""
+        if attachment.data is not None:
+            return attachment.data
+        url = attachment.url or f"{self.base_url}/rest/api/3/attachment/content/{attachment.file_id}"
+        return download(self.client, url, service=SERVICE, auth_hint=AUTH_HINT, auth=self.auth)
+
     def fetch(self, since: datetime | None = None) -> list[NormalizedMessage]:
         messages: list[NormalizedMessage] = []
         for issue in self._issues(since):
@@ -219,7 +279,9 @@ class JiraConnector(ApiConnector):
                         raw={"type": "issue", "key": key, "issue": issue},
                     )
                 )
-            for comment in self._comments(key):
+            comments = self._comments(key)
+            messages.extend(self._voice_messages(issue, key, created, comments))
+            for comment in comments:
                 body = adf_to_text(comment.get("body"))
                 sent_at = _jira_date(comment.get("created"))
                 if not body or sent_at is None:
