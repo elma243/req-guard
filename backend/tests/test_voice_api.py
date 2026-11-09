@@ -184,3 +184,53 @@ def test_requirement_from_a_transcript_shows_its_voice_source(client, owner, db_
     detail = client.get(f"{base}/requirements/{requirements[0]['id']}", headers=headers).json()
     source = detail["sources"][0]
     assert (source["has_audio"], source["voice"]["duration"], source["voice"]["language"]) == (True, 4.2, "english")
+
+
+# ---------- audio player: type, length and byte ranges ----------
+
+
+def _stored_audio(client, owner, name: str, data: bytes, db_session_factory, mime: str | None = None) -> str:
+    headers, base = owner
+    upload(client, headers, base, (name, data))
+    message_id = client.get(f"{base}/messages", headers=headers).json()["items"][0]["id"]
+    if mime:
+        with db_session_factory() as db:
+            db.get(VoiceAudio, message_id).mime_type = mime
+            db.commit()
+    return f"{base}/messages/{message_id}/audio"
+
+
+def test_audio_supports_byte_ranges(client, owner, db_session_factory):
+    headers, _ = owner
+    url = _stored_audio(client, owner, "voice.ogg", b"0123456789", db_session_factory)
+
+    full = client.get(url, headers=headers)
+    assert (full.status_code, full.headers["accept-ranges"], full.headers["content-length"]) == (200, "bytes", "10")
+
+    part = client.get(url, headers={**headers, "Range": "bytes=2-5"})
+    assert (part.status_code, part.content, part.headers["content-range"]) == (206, b"2345", "bytes 2-5/10")
+    assert part.headers["content-length"] == "4"
+
+    open_end = client.get(url, headers={**headers, "Range": "bytes=7-"})
+    assert (open_end.status_code, open_end.content) == (206, b"789")
+    suffix = client.get(url, headers={**headers, "Range": "bytes=-3"})
+    assert (suffix.status_code, suffix.content, suffix.headers["content-range"]) == (206, b"789", "bytes 7-9/10")
+    past_end = client.get(url, headers={**headers, "Range": "bytes=20-"})
+    assert (past_end.status_code, past_end.headers["content-range"]) == (416, "bytes */10")
+
+
+@pytest.mark.parametrize(
+    "name,stored_type,served",
+    [
+        ("file_7.oga", "audio/ogg", "audio/ogg"),  # Telegram voice
+        ("voice.opus", "audio/opus", "audio/ogg"),
+        ("brief.m4a", "audio/x-m4a", "audio/mp4"),
+        ("call.mp3", "audio/mp3", "audio/mpeg"),
+        ("clip.webm", "audio/webm", "audio/webm"),
+    ],
+)
+def test_audio_is_served_with_a_playable_type(client, owner, db_session_factory, name, stored_type, served):
+    headers, _ = owner
+    upload_name = name if not name.endswith(".oga") else "file_7.ogg"  # .oga is not an upload type
+    url = _stored_audio(client, owner, upload_name, b"fake", db_session_factory, mime=stored_type)
+    assert client.get(url, headers=headers).headers["content-type"] == served

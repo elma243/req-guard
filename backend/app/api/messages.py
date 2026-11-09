@@ -3,16 +3,18 @@
 Voice notes: Retry queues a failed transcription again; the audio endpoint plays a stored voice note.
 """
 
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
 from app.ai import speech
 from app.ai.speech import RetranscribeBusy, RetranscribeError, TranscriptionNotConfigured, can_retranscribe, queue_again
 from app.api.deps import DbSession, OptionalLLM, OwnedProject
+from app.connectors.base import audio_mime
 from app.models import Message, Project, VoiceAudio
 from app.models.message import KIND_VOICE, TRANSCRIPT_DONE, TRANSCRIPT_RUNNING, TRANSCRIPT_SKIPPED
 from app.nlp.extraction import extract_requirements
@@ -182,18 +184,58 @@ def retranscribe_message(
     return RetranscribeResult(message=message_out(message, bool(_with_audio(db, [message.id]))), extraction=extraction)
 
 
+# Types browsers know for <audio> (Chrome does not play "audio/opus" or "audio/x-m4a" as such)
+PLAYABLE_TYPES = {
+    "audio/opus": "audio/ogg",
+    "audio/x-m4a": "audio/mp4",
+    "audio/m4a": "audio/mp4",
+    "audio/mp3": "audio/mpeg",
+    "audio/x-wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/x-flac": "audio/flac",
+}
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def playable_type(filename: str, mime_type: str) -> str:
+    mime = audio_mime(filename, mime_type) or "application/octet-stream"
+    return PLAYABLE_TYPES.get(mime, mime)
+
+
 @router.get("/{message_id}/audio")
-def message_audio(message_id: int, project: OwnedProject, db: DbSession) -> Response:
-    """The stored audio of a voice note, for the play button."""
+def message_audio(
+    message_id: int,
+    project: OwnedProject,
+    db: DbSession,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+) -> Response:
+    """The stored audio of a voice note, for the play button.
+
+    Supports HTTP Range requests (206 Partial Content): Chrome reads the end of an Ogg/Opus file to find its
+    length and needs ranges to show the duration and to seek.
+    """
     message = _get_message(db, project, message_id)
     audio = db.get(VoiceAudio, message.id)
     if audio is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="The audio of this message is not stored.")
-    return Response(
-        content=audio.data,
-        media_type=audio.mime_type,
-        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
-    )
+    data, size = audio.data, len(audio.data)
+    media_type = playable_type(audio.filename, audio.mime_type)
+    headers = {"Accept-Ranges": "bytes", "Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"}
+    match = _RANGE_RE.match((range_header or "").strip())
+    if match and (match[1] or match[2]):
+        if match[1]:
+            start, end = int(match[1]), min(int(match[2]) if match[2] else size - 1, size - 1)
+        else:  # "bytes=-500": the last 500 bytes
+            start, end = max(0, size - int(match[2])), size - 1
+        if start >= size or start > end:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        return Response(
+            content=data[start : end + 1],
+            status_code=206,
+            media_type=media_type,
+            headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}"},
+        )
+    return Response(content=data, media_type=media_type, headers=headers)
 
 
 @router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)

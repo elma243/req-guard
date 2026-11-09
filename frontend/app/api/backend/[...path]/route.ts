@@ -22,6 +22,9 @@ async function forward(request: NextRequest, { params }: Context) {
   const headers = new Headers(clientIpHeaders(request));
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
+  // Audio players ask for byte ranges (to find the length and to seek)
+  const range = request.headers.get("range");
+  if (range) headers.set("range", range);
   const token = request.cookies.get(TOKEN_COOKIE)?.value;
   if (token) headers.set("authorization", `Bearer ${token}`);
 
@@ -44,8 +47,19 @@ async function forward(request: NextRequest, { params }: Context) {
   }
 
   const response = new NextResponse(body, { status: res.status });
-  const resType = res.headers.get("content-type");
-  if (resType) response.headers.set("content-type", resType);
+  // Headers a media player needs: type, length and byte ranges (206 Partial Content keeps its status above)
+  for (const name of [
+    "content-type",
+    "content-range",
+    "accept-ranges",
+    "content-disposition",
+    "cache-control",
+  ]) {
+    const value = res.headers.get(name);
+    if (value) response.headers.set(name, value);
+  }
+  // The length of what is sent here (fetch may have decoded a compressed body)
+  if (body) response.headers.set("content-length", String(body.byteLength));
   const retryAfter = res.headers.get("retry-after");
   if (retryAfter) response.headers.set("retry-after", retryAfter);
 

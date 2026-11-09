@@ -35,7 +35,7 @@ export function VoiceBadge({ voice }: { voice?: VoiceInfo | null }) {
 export function VoicePlayer({ projectId, messageId }: { projectId: string; messageId: number }) {
   // No captions track: the transcript is shown next to the player
   return (
-    <audio controls preload="none" src={messageAudioUrl(projectId, messageId)} className="mt-2 h-8 w-full max-w-xs" />
+    <audio controls preload="metadata" src={messageAudioUrl(projectId, messageId)} className="mt-2 h-8 w-full max-w-xs" />
   );
 }
 
