@@ -40,8 +40,15 @@ Voice notes from every source are transcribed with Groq Whisper (`GROQ_API_KEY`)
 - Sources: Telegram voice/audio, Discord voice messages and audio attachments, Slack audio clips and audio uploads,
   Gmail and Jira audio attachments, WhatsApp ZIP exports "with media", Messenger export ZIPs, .eml audio
   attachments, and audio files uploaded on the Sources page (mp3, m4a, ogg/opus, wav, webm, max 25 MB).
-- Models: `whisper-large-v3`, then `whisper-large-v3-turbo` if it is busy or fails. The project's "Voice language"
-  (Auto / Bangla / English) is sent to Whisper; Auto lets it detect the language.
+- Models: always `whisper-large-v3` (better for Bangla); `whisper-large-v3-turbo` only when large-v3 is busy,
+  rate limited or times out. The project's "Voice language" (Auto / Bangla / English) is sent to Whisper.
+- Auto mode: Whisper often hears Bangla as Hindi and writes Devanagari. When the detected language is not in
+  `VOICE_ALLOWED_LANGUAGES` (default `bn,en`) or the text contains Devanagari, the note is transcribed once more as
+  Bangla. That costs a second Groq request. For a project whose notes are nearly all Bangla, set Voice language to
+  Bangla. Garbled English that Whisper reports as English is not caught; use "Re-transcribe as".
+- "Re-transcribe as: Bangla / English" on the Messages page needs the audio: it works when `KEEP_AUDIO=true`, or
+  for API sources (Telegram, Slack, ...) whose connector downloads it again. With `KEEP_AUDIO=false`, uploaded
+  voice notes cannot be re-transcribed after their first transcript.
 - Groq limits (free tier): 20 requests per minute (`GROQ_AUDIO_RPM`) and a number of audio seconds per hour and per
   day. A rate-limited note goes back to the queue and is tried later; after 5 failed attempts it shows
   "voice (not transcribed)" with a Retry button. Notes over 25 MB are kept but not transcribed.

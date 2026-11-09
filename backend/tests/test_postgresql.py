@@ -225,6 +225,7 @@ def test_voice_note_transcription_on_postgresql(pg, monkeypatch):
 
     pg.expire_all()
     message = pg.get(Message, message_id)
-    assert (message.transcript_status, message.raw["voice"]["language"]) == ("done", "bengali")
+    assert (message.transcript_status, message.raw["voice"]["language"]) == ("done", "bangla")
+    assert message.raw["voice"]["detected_language"] == "bengali"
     assert pg.get(VoiceAudio, message_id) is None
     assert pg.scalar(select(func.count()).select_from(Requirement).where(Requirement.project_id == project.id)) == 1
