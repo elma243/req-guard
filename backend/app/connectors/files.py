@@ -22,8 +22,14 @@ from app.connectors.base import (
     decode_text,
     stable_id,
 )
-from app.connectors.messenger_export import MessengerExportConnector, is_messenger_json
-from app.connectors.whatsapp_export import WhatsAppExportConnector, is_whatsapp_text
+from app.connectors.archive import ArchiveError, open_zip, read_text_member
+from app.connectors.messenger_export import (
+    MessengerExportConnector,
+    MessengerZipConnector,
+    is_messenger_json,
+    message_files,
+)
+from app.connectors.whatsapp_export import WhatsAppExportConnector, WhatsAppZipConnector, find_chat, is_whatsapp_text
 
 # ---------------------------------------------------------------------------
 # Email (.eml)
@@ -295,11 +301,27 @@ class MeetingNotesConnector(FileConnector):
 
 CONNECTORS: dict[str, type[FileConnector]] = {
     "whatsapp": WhatsAppExportConnector,
+    "whatsapp_zip": WhatsAppZipConnector,
     "messenger": MessengerExportConnector,
+    "messenger_zip": MessengerZipConnector,
     EMAIL_SOURCE: EmailFileConnector,
     NOTES_SOURCE: MeetingNotesConnector,
 }
-SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json")
+SUPPORTED_EXTENSIONS = (".txt", ".md", ".eml", ".json", ".zip")
+
+
+def zip_kind(data: bytes) -> str | None:
+    """whatsapp_zip / messenger_zip from the files inside, or None."""
+    try:
+        archive = open_zip(data)
+        if find_chat(archive) is not None:
+            return "whatsapp_zip"
+        for info in message_files(archive):
+            if is_messenger_json(json.loads(read_text_member(archive, info).decode("utf-8-sig"))):
+                return "messenger_zip"
+    except (ArchiveError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return None
 
 
 def detect_type(filename: str, data: bytes) -> str | None:
@@ -307,6 +329,8 @@ def detect_type(filename: str, data: bytes) -> str | None:
     ext = PurePath(filename).suffix.lower()
     if ext == ".eml":
         return EMAIL_SOURCE
+    if ext == ".zip":
+        return zip_kind(data)
     if ext == ".json":
         try:
             return "messenger" if is_messenger_json(json.loads(data.decode("utf-8-sig"))) else None
