@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.ai.speech import start_worker
 from app.api import auth, messages, projects, requirements, sources, team
 from app.connectors.scheduler import start_scheduler
 from app.core.config import settings
@@ -17,16 +18,18 @@ from app.core.db import get_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Starts the auto-sync scheduler unless AUTO_SYNC_ENABLED=false (it needs a single backend worker)."""
+    """Starts the auto-sync scheduler and the voice note transcription worker, unless AUTO_SYNC_ENABLED=false /
+    TRANSCRIPTION_WORKER_ENABLED=false (both need a single backend worker)."""
     app.state.auto_sync_task = start_scheduler() if settings.auto_sync_enabled else None
+    app.state.transcription_task = start_worker() if settings.transcription_worker_enabled else None
     try:
         yield
     finally:
-        task = app.state.auto_sync_task
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for task in (app.state.auto_sync_task, app.state.transcription_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
 
 app = FastAPI(title="ReqGuard API", version="0.1.0", lifespan=lifespan)

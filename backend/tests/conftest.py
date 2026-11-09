@@ -30,7 +30,7 @@ import app.models  # noqa: E402, F401  (registers models on Base.metadata)
 from app.core.db import Base, get_db  # noqa: E402
 from app.api.deps import get_optional_llm_client  # noqa: E402
 from app.main import app  # noqa: E402
-from app.ai import llm  # noqa: E402
+from app.ai import llm, speech  # noqa: E402
 from app.connectors import http as connector_http  # noqa: E402
 from app.core import email as mailer  # noqa: E402
 from app.core.config import settings  # noqa: E402
@@ -52,6 +52,8 @@ def no_retry_wait(monkeypatch):
     """Rate-limit retries in connectors and the LLM client do not really sleep in tests."""
     monkeypatch.setattr(connector_http, "sleep", lambda seconds: None)
     monkeypatch.setattr(llm, "sleep", lambda seconds: None)
+    monkeypatch.setattr(speech, "sleep", lambda seconds: None)
+    speech.limiter.reset()
 
 
 @pytest.fixture(autouse=True)

@@ -27,12 +27,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.ai.llm import LLMClient, LLMError, LLMUnavailableError, now, thinking_level
 from app.core.config import settings
 from app.models import Message, Project, Requirement, RequirementSource, RequirementVersion
+from app.models.message import KIND_TEXT, TRANSCRIPT_DONE
 from app.models.requirement import requirement_code
 from app.schemas.extraction import ExtractedRequirement, ExtractionAnswer, ExtractResult
 
@@ -394,7 +395,12 @@ def extract_requirements(
         db.execute(reset.values(requirements_extracted_at=None))
         db.commit()
 
-    pending = [Message.project_id == project.id, Message.requirements_extracted_at.is_(None)]
+    pending = [
+        Message.project_id == project.id,
+        Message.requirements_extracted_at.is_(None),
+        # Voice messages are read once they are transcribed
+        or_(Message.kind == KIND_TEXT, Message.transcript_status == TRANSCRIPT_DONE),
+    ]
     if only_message_ids is not None:
         pending.append(Message.id.in_(only_message_ids))
     total = db.scalar(select(func.count()).select_from(Message).where(*pending)) or 0
