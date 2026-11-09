@@ -4,6 +4,10 @@ Lists the text channels of one server (guild) and reads their messages forward w
 The newest message id per channel is stored in Source.config["state"], so the next sync only reads
 new messages. The bot needs the "Message Content" intent, and View Channel + Read Message History
 permissions in the channels.
+
+Voice notes: Discord voice messages (flag IS_VOICE_MESSAGE) and audio attachments (.ogg, .mp3, .m4a...) become
+voice messages. Attachment URLs are signed and expire; when a download fails, the message is read again for a
+fresh URL.
 """
 
 import re
@@ -13,8 +17,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, field_validator
 
-from app.connectors.base import NormalizedMessage, as_utc
-from app.connectors.http import MAX_PAGES, ApiConnector, ConnectorError, json_body, send
+from app.connectors.base import AudioAttachment, NormalizedMessage, as_utc, audio_mime, voice_message
+from app.connectors.http import MAX_PAGES, ApiConnector, AudioTooLargeError, ConnectorError, download, json_body, send
 
 SOURCE = "discord"
 SERVICE = "Discord"
@@ -25,6 +29,7 @@ AUTH_HINT = (
 PAGE_SIZE = 100
 TEXT_CHANNEL_TYPES = {0, 5}  # GUILD_TEXT, GUILD_ANNOUNCEMENT
 MESSAGE_TYPES = {0, 19}  # DEFAULT, REPLY (joins, pins, boosts... are skipped)
+IS_VOICE_MESSAGE = 1 << 13
 
 
 class DiscordSettings(BaseModel):
@@ -49,6 +54,24 @@ class DiscordSettings(BaseModel):
 def _author(message: dict) -> str:
     author = message.get("author") or {}
     return str(author.get("global_name") or author.get("username") or author.get("id") or "")
+
+
+def _audio(attachment: dict, voice_flag: bool, channel_id: str, message_id: str) -> AudioAttachment | None:
+    filename = str(attachment.get("filename") or "voice-message.ogg")
+    mime = audio_mime(filename, attachment.get("content_type"))
+    if mime is None and voice_flag:
+        mime = "audio/ogg"  # voice messages are Ogg Opus
+    if mime is None or not attachment.get("id"):
+        return None
+    return AudioAttachment(
+        file_id=str(attachment["id"]),
+        filename=filename,
+        mime_type=mime,
+        size=attachment.get("size") if isinstance(attachment.get("size"), int) else None,
+        duration=attachment.get("duration_secs"),
+        url=attachment.get("url"),
+        ref={"channel_id": channel_id, "message_id": message_id, "voice_message": voice_flag},
+    )
 
 
 class DiscordConnector(ApiConnector):
@@ -105,6 +128,49 @@ class DiscordConnector(ApiConnector):
                 break
         return found
 
+    def _to_messages(self, message: dict, channel: dict, channel_id: str) -> list[NormalizedMessage]:
+        """The text message and one voice message per audio attachment."""
+        message_id = str(message["id"])
+        fields = {
+            "source": SOURCE,
+            "channel": f"#{channel.get('name', channel_id)}",
+            "author": _author(message),
+            "sent_at": as_utc(datetime.fromisoformat(message["timestamp"])),
+        }
+        raw = {"guild_id": self.settings.guild_id, "channel_id": channel_id, "message": message}
+        found: list[NormalizedMessage] = []
+        text = str(message.get("content") or "").strip()
+        if text:
+            found.append(NormalizedMessage(external_id=message_id, text=text, raw=raw, **fields))
+        voice_flag = bool(int(message.get("flags") or 0) & IS_VOICE_MESSAGE)
+        for attachment in message.get("attachments") or []:
+            audio = _audio(attachment, voice_flag, channel_id, message_id)
+            if audio is not None:
+                found.append(voice_message(parent_id=message_id, attachment=audio, raw=raw, **fields))
+        return found
+
+    def download_audio(self, attachment: AudioAttachment) -> bytes:
+        """The CDN URL from the sync; if it expired (or fails), read the message again for a fresh one."""
+        if attachment.data is not None:
+            return attachment.data
+        if attachment.url:
+            try:
+                return download(self.client, attachment.url, service=SERVICE)
+            except AudioTooLargeError:
+                raise
+            except ConnectorError:
+                pass
+        channel_id, message_id = attachment.ref.get("channel_id"), attachment.ref.get("message_id")
+        if not channel_id or not message_id:
+            raise ConnectorError("Discord gave no download address for this voice note.")
+        message = self._get(f"/channels/{channel_id}/messages/{message_id}")
+        fresh = next(
+            (a.get("url") for a in message.get("attachments") or [] if str(a.get("id")) == attachment.file_id), None
+        )
+        if not fresh:
+            raise ConnectorError("This voice note is no longer on Discord.")
+        return download(self.client, fresh, service=SERVICE)
+
     def fetch(self, since: datetime | None = None) -> list[NormalizedMessage]:
         """`since` is not used: the stored message id per channel decides what is new."""
         last_ids: dict[str, str] = dict(self.state.get("last_message_ids") or {})
@@ -119,20 +185,7 @@ class DiscordConnector(ApiConnector):
                 if message.get("type") not in MESSAGE_TYPES or (message.get("author") or {}).get("bot"):
                     continue
                 human_messages += 1
-                text = str(message.get("content") or "").strip()
-                if not text:
-                    continue
-                messages.append(
-                    NormalizedMessage(
-                        source=SOURCE,
-                        external_id=str(message["id"]),
-                        channel=f"#{channel.get('name', channel_id)}",
-                        author=_author(message),
-                        sent_at=as_utc(datetime.fromisoformat(message["timestamp"])),
-                        text=text,
-                        raw={"guild_id": self.settings.guild_id, "channel_id": channel_id, "message": message},
-                    )
-                )
+                messages.extend(self._to_messages(message, channel, channel_id))
         if human_messages and not messages:
             raise ConnectorError(
                 "Discord returned messages without text. Turn on the Message Content intent for the bot "
