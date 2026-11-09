@@ -157,3 +157,25 @@ def test_zip_media_matches_names_only(name):
     attachment = media.attachment(name, "missing")
     assert attachment.filename in {"passwd.opus", "PTT-1.opus"}
     assert attachment.data in {b"a", b"b"}
+
+
+# ---------- .eml ----------
+
+
+def test_eml_audio_attachments_become_voice_messages():
+    from email.message import EmailMessage
+
+    email = EmailMessage()
+    email["From"] = "Karim <karim@acme.example.com>"
+    email["Subject"] = "Voice brief"
+    email["Message-ID"] = "<abc@acme.example.com>"
+    email["Date"] = "Mon, 20 Oct 2026 10:00:00 +0600"
+    email.set_content("Please listen to the attached note.")
+    email.add_attachment(b"fake-m4a", maintype="audio", subtype="mp4", filename="brief.m4a")
+    email.add_attachment(b"%PDF", maintype="application", subtype="pdf", filename="spec.pdf")
+
+    messages = connector_for_upload("brief.eml", email.as_bytes()).fetch()
+    assert [m.kind for m in messages] == ["text", "voice"]
+    voice = messages[1]
+    assert voice.external_id == "abc@acme.example.com:audio:1:brief.m4a"
+    assert (voice.audio.data, voice.audio.mime_type, voice.channel) == (b"fake-m4a", "audio/mp4", "Voice brief")

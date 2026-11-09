@@ -1,4 +1,5 @@
-"""Parsers for uploaded files (no network): .eml emails and .txt/.md meeting notes.
+"""Parsers for uploaded files (no network): .eml emails (with their audio attachments as voice notes) and
+.txt/.md meeting notes.
 
 Also decides which parser an uploaded file needs (`detect_type`, `connector_for_upload`).
 """
@@ -14,13 +15,16 @@ from html.parser import HTMLParser
 from pathlib import PurePath
 
 from app.connectors.base import (
+    AudioAttachment,
     FileConnector,
     NormalizedMessage,
     OccurrenceCounter,
     ParseResult,
     as_utc,
+    audio_mime,
     decode_text,
     stable_id,
+    voice_message,
 )
 from app.connectors.archive import ArchiveError, open_zip, read_text_member
 from app.connectors.messenger_export import (
@@ -158,13 +162,32 @@ def _email_author(msg: EmailMessage) -> str:
     return str(header or "").strip()
 
 
+def email_audio(msg: EmailMessage) -> list[AudioAttachment]:
+    """Audio attachments of an email, with their bytes."""
+    found: list[AudioAttachment] = []
+    for index, part in enumerate(msg.iter_attachments()):
+        name = part.get_filename() or f"attachment-{index + 1}"
+        mime = audio_mime(name, part.get_content_type())
+        if mime is None:
+            continue
+        try:
+            data = part.get_payload(decode=True) or b""
+        except (LookupError, ValueError):
+            continue
+        found.append(
+            AudioAttachment(file_id=f"{index + 1}:{name}", filename=name, mime_type=mime, size=len(data), data=data)
+        )
+    return found
+
+
 def parse_eml(data: bytes, filename: str, now: datetime | None = None) -> ParseResult:
     msg = BytesParser(policy=policy.default).parsebytes(data)
     subject = " ".join(str(msg.get("Subject") or "").split())
     original_body = _email_body(msg)
     body = clean_email_body(original_body)
+    audio = email_audio(msg)
     result = ParseResult()
-    if not body and not subject:
+    if not body and not subject and not audio:
         result.skipped = 1
         return result
 
@@ -172,28 +195,33 @@ def parse_eml(data: bytes, filename: str, now: datetime | None = None) -> ParseR
     sent_at = _email_date(msg, now or datetime.now(timezone.utc))
     message_id = str(msg.get("Message-ID") or "").strip().strip("<>")
     text = f"{subject}\n\n{body}".strip() if subject else body
-
-    result.messages.append(
-        NormalizedMessage(
-            source=EMAIL_SOURCE,
-            external_id=message_id or stable_id(EMAIL_SOURCE, author, sent_at.isoformat(), subject, body),
-            channel=thread_subject(subject) or "(no subject)",
-            author=author,
-            sent_at=sent_at,
-            text=text,
-            raw={
-                "filename": filename,
-                "message_id": message_id,
-                "from": str(msg.get("From") or ""),
-                "to": str(msg.get("To") or ""),
-                "cc": str(msg.get("Cc") or ""),
-                "date": str(msg.get("Date") or ""),
-                "subject": subject,
-                "in_reply_to": str(msg.get("In-Reply-To") or ""),
-                "body": original_body,
-            },
+    external_id = message_id or stable_id(EMAIL_SOURCE, author, sent_at.isoformat(), subject, body)
+    channel = thread_subject(subject) or "(no subject)"
+    raw = {
+        "filename": filename,
+        "message_id": message_id,
+        "from": str(msg.get("From") or ""),
+        "to": str(msg.get("To") or ""),
+        "cc": str(msg.get("Cc") or ""),
+        "date": str(msg.get("Date") or ""),
+        "subject": subject,
+        "in_reply_to": str(msg.get("In-Reply-To") or ""),
+        "body": original_body,
+    }
+    if text:
+        result.messages.append(
+            NormalizedMessage(
+                source=EMAIL_SOURCE, external_id=external_id, channel=channel, author=author, sent_at=sent_at,
+                text=text, raw=raw,
+            )
         )
-    )
+    for attachment in audio:
+        result.messages.append(
+            voice_message(
+                source=EMAIL_SOURCE, parent_id=external_id, channel=channel, author=author, sent_at=sent_at,
+                attachment=attachment, raw=raw,
+            )
+        )
     return result
 
 
