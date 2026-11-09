@@ -1,12 +1,14 @@
 // Badges and small labels shared by the requirements table, detail panel and dialogs.
 
 import SourceBadge from "@/components/SourceBadge";
+import { VoiceBadge } from "@/components/VoiceNote";
 import {
   RULE_BASED_MODEL,
   type Requirement,
   type RequirementSource,
   type RequirementStatus,
   type RequirementVersion,
+  type VoiceInfo,
 } from "@/lib/api";
 
 const STATUS_STYLE: Record<RequirementStatus, string> = {
@@ -96,10 +98,11 @@ export function Kbd({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function SourceLine({ source: s }: { source: RequirementSource }) {
+export function SourceLine({ source: s }: { source: RequirementSource & { voice?: VoiceInfo | null } }) {
   return (
     <p className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
       <SourceBadge source={s.source} />
+      {s.message_kind === "voice" && <VoiceBadge voice={s.voice} />}
       {s.author && <span>{s.author}</span>}
       <span className="tabular-nums">{formatTime(s.sent_at)}</span>
     </p>

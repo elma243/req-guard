@@ -129,12 +129,20 @@ export type Project = {
   scope_text: string;
   modules: ProjectModule[];
   auto_extract: boolean; // extract requirements from auto-synced messages right after the sync
+  voice_language: VoiceLanguage; // language of voice notes for transcription
   owner_id: number;
   created_at: string;
   updated_at: string;
 };
 
 export type ProjectModule = { name: string; description: string };
+
+export const VOICE_LANGUAGES = [
+  { value: "auto", label: "Auto" },
+  { value: "bn", label: "Bangla" },
+  { value: "en", label: "English" },
+] as const;
+export type VoiceLanguage = (typeof VOICE_LANGUAGES)[number]["value"];
 
 export type ProjectInput = Pick<Project, "name" | "description" | "scope_text">;
 
@@ -152,7 +160,7 @@ export function getProject(id: number | string) {
 
 export function updateProject(
   id: number | string,
-  data: Partial<ProjectInput> & Pick<Partial<Project>, "modules" | "auto_extract">,
+  data: Partial<ProjectInput> & Pick<Partial<Project>, "modules" | "auto_extract" | "voice_language">,
 ) {
   return apiFetch<Project>(`/projects/${id}`, { method: "PATCH", body: json(data) });
 }
@@ -197,7 +205,14 @@ export function deleteMember(projectId: number | string, memberId: number) {
 // ---------- Sources and uploads ----------
 
 export const API_SOURCES = ["jira", "slack", "gmail", "telegram", "discord"] as const;
-export const MESSAGE_SOURCES = ["whatsapp", "messenger", "email", "meeting_notes", ...API_SOURCES] as const;
+export const MESSAGE_SOURCES = [
+  "whatsapp",
+  "messenger",
+  "email",
+  "meeting_notes",
+  "voice_upload",
+  ...API_SOURCES,
+] as const;
 export type MessageSource = (typeof MESSAGE_SOURCES)[number];
 
 export type Source = {
@@ -230,6 +245,8 @@ export type FileImportResult = {
   imported: number;
   duplicates: number;
   skipped: number;
+  voice_queued: number; // new voice notes waiting for transcription
+  voice_skipped: number; // new voice notes that cannot be transcribed (reason on the message)
   error: string | null;
 };
 
@@ -237,8 +254,13 @@ export type UploadResult = {
   imported: number;
   duplicates: number;
   skipped: number;
+  voice_queued: number;
+  voice_skipped: number;
   files: FileImportResult[];
 };
+
+// File types the upload accepts (chat exports, ZIPs "with media", emails, notes, voice notes)
+export const UPLOAD_ACCEPT = ".txt,.md,.eml,.json,.zip,.mp3,.m4a,.ogg,.opus,.wav,.webm";
 
 export function listSources(projectId: number | string) {
   return apiFetch<Source[]>(`/projects/${projectId}/sources`);
@@ -262,7 +284,13 @@ export type Connector = { type: string; label: string; configured: boolean; miss
 
 export type SourceCreate = { type: string; display_name: string; settings: Record<string, unknown> };
 
-export type SyncResult = { imported: number; duplicates: number; sync_status: string; last_synced_at: string | null };
+export type SyncResult = {
+  imported: number;
+  duplicates: number;
+  voice_queued: number;
+  sync_status: string;
+  last_synced_at: string | null;
+};
 
 export type SourceStatus = {
   id: number;
@@ -318,6 +346,15 @@ export function markMessagesSeen(projectId: number | string) {
   return apiFetch<{ count: number }>(`/projects/${projectId}/messages/seen`, { method: "POST" });
 }
 
+export type TranscriptStatus = "pending" | "transcribing" | "done" | "failed" | "skipped";
+
+export type VoiceInfo = {
+  filename: string | null;
+  duration: number | null; // seconds
+  language: string | null; // detected by Whisper, e.g. "bengali"
+  model: string | null;
+};
+
 export type Message = {
   id: number;
   source_id: number | null;
@@ -326,8 +363,13 @@ export type Message = {
   channel: string;
   author: string;
   sent_at: string;
-  text: string;
+  text: string; // the transcript for voice notes ("" until transcribed)
   imported_at: string;
+  kind: "text" | "voice";
+  transcript_status: TranscriptStatus | null; // null for text messages
+  transcript_error: string | null;
+  has_audio: boolean; // the audio is stored and can be played
+  voice: VoiceInfo | null;
 };
 
 export type MessagePage = { items: Message[]; total: number; page: number; page_size: number };
@@ -348,6 +390,16 @@ export function listMessages(projectId: number | string, filters: MessageFilters
     if (value !== undefined && value !== "") params.set(key, String(value));
   }
   return apiFetch<MessagePage>(`/projects/${projectId}/messages?${params}`);
+}
+
+// Retry: queue a voice note that was not transcribed again
+export function retryTranscription(projectId: number | string, messageId: number) {
+  return apiFetch<Message>(`/projects/${projectId}/messages/${messageId}/transcribe`, { method: "POST" });
+}
+
+// Same-origin URL of a stored voice note (the proxy adds the login token)
+export function messageAudioUrl(projectId: number | string, messageId: number) {
+  return `/api/backend/projects/${projectId}/messages/${messageId}/audio`;
 }
 
 export function deleteMessage(projectId: number | string, messageId: number) {
@@ -383,6 +435,7 @@ export type RequirementSource = {
   author: string;
   sent_at: string;
   merged_from_id: number | null; // the requirement this sentence came from through a merge
+  message_kind: "text" | "voice"; // "voice": the sentence comes from a transcribed voice note
 };
 
 export type Requirement = {
@@ -407,7 +460,7 @@ export type Requirement = {
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
-  sources: (RequirementSource & { message_text: string })[];
+  sources: (RequirementSource & { message_text: string; has_audio: boolean; voice: VoiceInfo | null })[];
   versions: RequirementVersion[]; // oldest first
   findings: ValidationFinding[];
 };

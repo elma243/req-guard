@@ -617,6 +617,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
 
       {active && panelId !== null && (
         <RequirementPanel
+          projectId={projectId}
           requirement={active}
           detail={detail?.id === panelId ? detail : null}
           codes={codes}

@@ -366,6 +366,9 @@ function SourceRow({
   const syncing = busy || source.syncing;
   // The latest error comes from this click, else from the last sync stored on the source
   const shownError = error || (result ? "" : source.sync_error ?? "");
+  // Set by the connector, e.g. Slack without files:read: "Add files:read to read voice notes"
+  const state = (source.config?.state ?? {}) as { voice_notice?: unknown };
+  const voiceNotice = typeof state.voice_notice === "string" ? state.voice_notice : "";
 
   return (
     <li className="py-3">
@@ -446,6 +449,13 @@ function SourceRow({
       {result && (
         <p className="mt-1.5 text-xs text-emerald-300">
           {result.imported} new · {result.duplicates} already imported
+          {result.voice_queued > 0 && ` · 🎤 ${result.voice_queued} voice notes to transcribe`}
+        </p>
+      )}
+      {voiceNotice && (
+        <p className="mt-1.5 text-xs text-amber-300">
+          <span aria-hidden>🎤</span> {voiceNotice}
+          {source.type === "slack" && " (Slack app → OAuth & Permissions → Bot Token Scopes, then reinstall the app)."}
         </p>
       )}
       {shownError && <p className="mt-1.5 text-xs text-rose-300">{shownError}</p>}
