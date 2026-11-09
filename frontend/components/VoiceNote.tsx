@@ -7,6 +7,7 @@ import { useState } from "react";
 import { errorText } from "@/components/ui";
 import {
   messageAudioUrl,
+  retranscribe,
   retryTranscription,
   type Message,
   type TranscriptStatus,
@@ -43,38 +44,91 @@ const WAITING: Partial<Record<TranscriptStatus, string>> = {
   transcribing: "Transcribing...",
 };
 
+const RETRANSCRIBE_LANGUAGES = [
+  { value: "bn", label: "Bangla" },
+  { value: "en", label: "English" },
+] as const;
+
+const smallButton =
+  "rounded-md bg-white/5 px-2.5 py-1 text-xs font-medium text-zinc-200 ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-50";
+
 type Props = {
   projectId: string;
-  message: Pick<Message, "id" | "text" | "transcript_status" | "transcript_error" | "has_audio" | "voice">;
+  message: Pick<
+    Message,
+    "id" | "text" | "transcript_status" | "transcript_error" | "has_audio" | "can_retranscribe" | "voice"
+  >;
   // Shown instead of the plain transcript (e.g. the expandable text of the Messages table)
   transcript?: React.ReactNode;
+  // After Retry or Re-transcribe changed the message
   onRetried?: (message: Message) => void;
 };
 
+function plural(n: number, word: string) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+// "bangla", plus how it got there: "auto-corrected from hindi" / "chosen"
+function LanguageLabel({ voice }: { voice: VoiceInfo | null }) {
+  if (!voice?.language) return null;
+  const note = voice.retried
+    ? `auto-corrected from ${voice.detected_language ?? "another language"}`
+    : voice.requested_language && voice.requested_language !== "auto"
+      ? "chosen"
+      : "";
+  return (
+    <span
+      className="text-xs text-zinc-500"
+      title={voice.retry_reason ? `Transcribed again as Bangla: ${voice.retry_reason}` : undefined}
+    >
+      {voice.language}
+      {note && ` · ${note}`}
+      {voice.previous_transcripts > 0 && ` · ${plural(voice.previous_transcripts, "earlier transcript")} kept`}
+    </span>
+  );
+}
+
 export default function VoiceNote({ projectId, message, transcript, onRetried }: Props) {
-  const [retrying, setRetrying] = useState(false);
+  const [busy, setBusy] = useState<"" | "retry" | "bn" | "en">("");
   const [error, setError] = useState("");
+  const [done, setDone] = useState("");
   const status = message.transcript_status;
 
   async function retry() {
-    setRetrying(true);
+    setBusy("retry");
     setError("");
     try {
       onRetried?.(await retryTranscription(projectId, message.id));
     } catch (err) {
       setError(errorText(err));
     } finally {
-      setRetrying(false);
+      setBusy("");
     }
   }
+
+  async function transcribeAgain(language: "bn" | "en") {
+    setBusy(language);
+    setError("");
+    setDone("");
+    try {
+      const result = await retranscribe(projectId, message.id, language);
+      const found = result.extraction.requirements_created;
+      setDone(`New transcript saved; ${found === 0 ? "no new requirements" : plural(found, "new requirement")}.`);
+      onRetried?.(result.message);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const canTranscribeAgain = status === "done" || status === "failed";
 
   return (
     <div>
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <VoiceBadge voice={message.voice} />
-        {status === "done" && message.voice?.language && (
-          <span className="text-xs text-zinc-500">{message.voice.language}</span>
-        )}
+        {status === "done" && <LanguageLabel voice={message.voice} />}
       </div>
 
       {status === "done" ? (
@@ -85,26 +139,46 @@ export default function VoiceNote({ projectId, message, transcript, onRetried }:
         )
       ) : status && WAITING[status] ? (
         <p className="text-zinc-400 italic">
-          {WAITING[status]}
-          {message.transcript_error && <span className="block text-xs not-italic text-zinc-500">{message.transcript_error}</span>}
+          {busy === "bn" || busy === "en" ? "Transcribing again..." : WAITING[status]}
+          {message.transcript_error && (
+            <span className="block text-xs not-italic text-zinc-500">{message.transcript_error}</span>
+          )}
         </p>
       ) : (
         <div className="text-sm">
           <p className="text-zinc-300">voice (not transcribed)</p>
           {message.transcript_error && <p className="mt-0.5 text-xs text-amber-300/90">{message.transcript_error}</p>}
           {status === "failed" && (
-            <button
-              type="button"
-              onClick={retry}
-              disabled={retrying}
-              className="mt-1.5 rounded-md bg-white/5 px-2.5 py-1 text-xs font-medium text-zinc-200 ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-50"
-            >
-              {retrying ? "Retrying..." : "Retry"}
+            <button type="button" onClick={retry} disabled={busy !== ""} className={`mt-1.5 ${smallButton}`}>
+              {busy === "retry" ? "Retrying..." : "Retry"}
             </button>
           )}
-          {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
         </div>
       )}
+
+      {canTranscribeAgain && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+          <span>Re-transcribe as:</span>
+          {RETRANSCRIBE_LANGUAGES.map((l) => (
+            <button
+              key={l.value}
+              type="button"
+              onClick={() => transcribeAgain(l.value)}
+              disabled={busy !== "" || !message.can_retranscribe}
+              title={
+                message.can_retranscribe
+                  ? `Transcribe this voice note again as ${l.label} and extract its requirements again`
+                  : "The audio was deleted after transcription (KEEP_AUDIO=false). Upload the file again to re-transcribe."
+              }
+              className={smallButton}
+            >
+              {busy === l.value ? "Transcribing..." : l.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {done && <p className="mt-1 text-xs text-emerald-300">{done}</p>}
+      {error && <p className="mt-1 text-xs text-rose-300">{error}</p>}
 
       {message.has_audio && <VoicePlayer projectId={projectId} messageId={message.id} />}
     </div>

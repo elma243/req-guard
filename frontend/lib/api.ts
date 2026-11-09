@@ -351,8 +351,13 @@ export type TranscriptStatus = "pending" | "transcribing" | "done" | "failed" | 
 export type VoiceInfo = {
   filename: string | null;
   duration: number | null; // seconds
-  language: string | null; // detected by Whisper, e.g. "bengali"
+  language: string | null; // final language of the transcript: "bangla", "english", else Whisper's name
   model: string | null;
+  requested_language: string | null; // "auto", "bn" or "en"
+  detected_language: string | null; // what Whisper heard first, e.g. "hindi"
+  retried: boolean; // transcribed again as Bangla because of the detected language or Devanagari text
+  retry_reason: string | null;
+  previous_transcripts: number; // earlier transcripts kept after Re-transcribe
 };
 
 export type Message = {
@@ -369,6 +374,7 @@ export type Message = {
   transcript_status: TranscriptStatus | null; // null for text messages
   transcript_error: string | null;
   has_audio: boolean; // the audio is stored and can be played
+  can_retranscribe: boolean; // the audio is stored or can be downloaded again from the source
   voice: VoiceInfo | null;
 };
 
@@ -395,6 +401,14 @@ export function listMessages(projectId: number | string, filters: MessageFilters
 // Retry: queue a voice note that was not transcribed again
 export function retryTranscription(projectId: number | string, messageId: number) {
   return apiFetch<Message>(`/projects/${projectId}/messages/${messageId}/transcribe`, { method: "POST" });
+}
+
+// Re-transcribe as Bangla / English: a new transcript (the old one is kept), then extraction runs again for it
+export function retranscribe(projectId: number | string, messageId: number, language: "bn" | "en") {
+  return apiFetch<{ message: Message; extraction: ExtractResult }>(
+    `/projects/${projectId}/messages/${messageId}/retranscribe`,
+    { method: "POST", body: json({ language }) },
+  );
 }
 
 // Same-origin URL of a stored voice note (the proxy adds the login token)
