@@ -167,3 +167,64 @@ def test_auto_sync_tick_on_postgresql(pg, monkeypatch):
     assert source.next_sync_at == T0 + timedelta(minutes=5)
     assert pg.get(Project, project.id).unseen_auto_messages == 1
     assert pg.scalar(select(func.count()).select_from(Requirement).where(Requirement.project_id == project.id)) == 1
+
+
+def test_voice_audio_has_row_level_security(pg):
+    enabled = pg.scalar(text("SELECT relrowsecurity FROM pg_class WHERE relname = 'voice_audio'"))
+    assert enabled is True
+
+
+def test_voice_note_transcription_on_postgresql(pg, monkeypatch):
+    """Storing a voice note with its audio (bytea), the claim UPDATE, transcription and auto-extract on PostgreSQL."""
+    import httpx
+    import respx
+
+    from app.ai import speech
+    from app.ai.speech import GROQ_URL, GroqWhisper, TranscriptionWorker
+    from app.connectors.base import AudioAttachment, voice_message
+    from app.connectors.importer import import_messages
+    from app.models import Message, VoiceAudio
+    from tests.test_auto_sync import T0
+
+    monkeypatch.setattr(speech, "sleep", lambda seconds: None)
+    user = User(name="PG", email=f"pg-voice-{uuid.uuid4().hex[:12]}@example.com", password_hash="x")
+    pg.add(user)
+    pg.flush()
+    project = Project(name="PG voice", owner_id=user.id, auto_extract=True, voice_language="bn")
+    pg.add(project)
+    pg.commit()
+
+    attachment = AudioAttachment(file_id="v1", filename="v1.opus", mime_type="audio/ogg", data=b"\x00fake-opus")
+    note = voice_message(
+        source="whatsapp", parent_id="pg-voice", channel="Acme", author="Karim", sent_at=T0,
+        attachment=attachment, raw={},
+    )
+    counts = import_messages(pg, project.id, None, [note])
+    pg.commit()
+    message_id = counts.new_ids[0]
+    assert pg.get(VoiceAudio, message_id).data == b"\x00fake-opus"
+
+    # The claim: a second claimer finds nothing while it is being transcribed
+    claimed = speech.claim_next(pg, T0)
+    assert claimed.id == message_id
+    assert speech.claim_next(pg, T0 + timedelta(minutes=1)) is None
+    pg.execute(text("UPDATE messages SET transcript_status = 'pending' WHERE id = :id"), {"id": message_id})
+    pg.commit()
+
+    with respx.mock:
+        respx.post(GROQ_URL).mock(
+            return_value=httpx.Response(200, json={"text": "The dashboard must show the order list.",
+                                                   "language": "bengali", "duration": 3.0})
+        )
+        worker = TranscriptionWorker(
+            _SharedSession(pg), lambda: T0,
+            transcriber_factory=lambda: GroqWhisper("gsk-test", ["whisper-large-v3"]),
+            llm_factory=lambda: None,
+        )
+        assert worker.tick() == 1
+
+    pg.expire_all()
+    message = pg.get(Message, message_id)
+    assert (message.transcript_status, message.raw["voice"]["language"]) == ("done", "bengali")
+    assert pg.get(VoiceAudio, message_id) is None
+    assert pg.scalar(select(func.count()).select_from(Requirement).where(Requirement.project_id == project.id)) == 1
