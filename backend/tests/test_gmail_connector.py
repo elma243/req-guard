@@ -15,6 +15,7 @@ from app.connectors.gmail import (
     authorize_url,
     exchange_code,
 )
+from app.connectors.base import AudioAttachment
 from app.connectors.http import ConnectorError, NeedsAuthError
 from tests.conftest import api_json
 
@@ -129,3 +130,80 @@ def test_wrong_client_secret():
     respx.post(TOKEN_URL).respond(401, json={"error": "invalid_client"})
     with make_connector() as connector, pytest.raises(ConnectorError, match="GOOGLE_CLIENT_SECRET"):
         connector.fetch()
+
+
+# ---------- Voice notes ----------
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _thread_with_audio(attachment_id: str = "ANGjdJ8-old") -> dict:
+    return {
+        "id": "t9",
+        "messages": [
+            {
+                "id": "m9",
+                "threadId": "t9",
+                "internalDate": "1792656000000",
+                "labelIds": ["INBOX"],
+                "payload": {
+                    "mimeType": "multipart/mixed",
+                    "headers": [{"name": "From", "value": "Karim <karim@acme.example.com>"},
+                                {"name": "Subject", "value": "Voice brief"}],
+                    "parts": [
+                        {"partId": "0", "mimeType": "text/plain", "filename": "",
+                         "body": {"data": _b64(b"Please listen to the note.")}},
+                        {"partId": "1", "mimeType": "audio/x-m4a", "filename": "brief.m4a",
+                         "body": {"attachmentId": attachment_id, "size": 42000}},
+                        {"partId": "2", "mimeType": "image/png", "filename": "logo.png",
+                         "body": {"attachmentId": "IMG", "size": 10}},
+                    ],
+                },
+            }
+        ],
+    }
+
+
+@respx.mock
+def test_audio_attachments_become_voice_messages():
+    respx.post(TOKEN_URL).respond(json=api_json("gmail/token_refresh.json"))
+    respx.get(f"{API}/threads").respond(json={"threads": [{"id": "t9"}]})
+    respx.get(f"{API}/threads/t9").respond(json=_thread_with_audio())
+    with make_connector() as connector:
+        messages = connector.fetch()
+    assert [(m.kind, m.external_id) for m in messages] == [("text", "m9"), ("voice", "m9:audio:1")]
+    voice = messages[1].audio
+    assert (voice.filename, voice.mime_type, voice.size) == ("brief.m4a", "audio/x-m4a", 42000)
+    assert voice.ref == {"message_id": "m9", "attachment_id": "ANGjdJ8-old", "part_id": "1"}
+
+
+@respx.mock
+def test_download_audio_uses_attachments_get():
+    token = respx.post(TOKEN_URL).respond(json=api_json("gmail/token_refresh.json"))
+    route = respx.get(f"{API}/messages/m9/attachments/ANGjdJ8-old").respond(json={"data": _b64(b"fake-m4a")})
+    attachment = AudioAttachment(
+        file_id="1", filename="brief.m4a", mime_type="audio/mp4",
+        ref={"message_id": "m9", "attachment_id": "ANGjdJ8-old", "part_id": "1"},
+    )
+    with make_connector() as connector:
+        assert connector.download_audio(attachment) == b"fake-m4a"
+    assert route.calls[0].request.headers["Authorization"].startswith("Bearer ")
+    assert token.call_count == 1
+
+
+@respx.mock
+def test_download_audio_reads_the_message_again_when_the_attachment_id_changed():
+    respx.post(TOKEN_URL).respond(json=api_json("gmail/token_refresh.json"))
+    respx.get(f"{API}/messages/m9/attachments/ANGjdJ8-old").respond(400)
+    respx.get(f"{API}/messages/m9").respond(json=_thread_with_audio("ANGjdJ8-new")["messages"][0])
+    respx.get(f"{API}/messages/m9/attachments/ANGjdJ8-new").respond(json={"data": _b64(b"fresh")})
+    attachment = AudioAttachment(
+        file_id="1", filename="brief.m4a", mime_type="audio/mp4",
+        ref={"message_id": "m9", "attachment_id": "ANGjdJ8-old", "part_id": "1"},
+    )
+    with make_connector() as connector:
+        assert connector.download_audio(attachment) == b"fresh"

@@ -5,6 +5,9 @@ Flow: the user clicks "Connect Google account" → Google consent page → our c
 On sync the refresh token is exchanged for a short-lived access token, the threads matching the
 user's search query (e.g. "from:client@acme.com") are listed, and every message becomes plain text.
 
+Voice notes: audio attachments become voice messages, downloaded later with messages.attachments.get. Their id
+uses the MIME part id, because Gmail's attachment ids change between reads.
+
 Note: while the Google OAuth client is in "Testing" mode, Google expires refresh tokens after 7 days;
 the source then shows "Connect Google account" again.
 """
@@ -19,7 +22,7 @@ from urllib.parse import urlencode
 import httpx
 from pydantic import BaseModel, field_validator
 
-from app.connectors.base import NormalizedMessage
+from app.connectors.base import AudioAttachment, NormalizedMessage, audio_mime, voice_message
 from app.connectors.files import clean_email_body, html_to_text, thread_subject
 from app.connectors.http import (
     MAX_PAGES,
@@ -156,6 +159,34 @@ def message_body(payload: dict) -> str:
     return html_to_text(_decode(html_part)) if html_part is not None else ""
 
 
+def _b64(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def audio_parts(part: dict) -> list[dict]:
+    """Parts that are audio attachments (with a file name), in order."""
+    found: list[dict] = []
+    if part.get("filename") and audio_mime(part["filename"], part.get("mimeType")):
+        found.append(part)
+    for child in part.get("parts") or []:
+        found.extend(audio_parts(child))
+    return found
+
+
+def _attachment(part: dict, message_id: str) -> AudioAttachment:
+    body = part.get("body") or {}
+    inline = body.get("data")
+    part_id = str(part.get("partId") or part.get("filename"))
+    return AudioAttachment(
+        file_id=part_id,
+        filename=str(part["filename"]),
+        mime_type=audio_mime(part["filename"], part.get("mimeType")) or "audio/mpeg",
+        size=body.get("size") if isinstance(body.get("size"), int) else None,
+        ref={"message_id": message_id, "attachment_id": body.get("attachmentId"), "part_id": part_id},
+        data=_b64(inline) if inline and not body.get("attachmentId") else None,
+    )
+
+
 def _author(from_header: str) -> str:
     addresses = getaddresses([from_header])
     if addresses and any(addresses[0]):
@@ -185,6 +216,12 @@ class GmailConnector(ApiConnector):
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
+        self._token: str | None = None
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._token is None:
+            self._token = self._access_token()
+        return {"Authorization": f"Bearer {self._token}"}
 
     def _access_token(self) -> str:
         body = _token_request(
@@ -233,33 +270,65 @@ class GmailConnector(ApiConnector):
             body = clean_email_body(original_body)
             # The subject is part of the text only for the first message; replies repeat it as "Re: ..."
             text = f"{subject}\n\n{body}".strip() if index == 0 and subject else body
-            if not text:
-                continue
-            messages.append(
-                NormalizedMessage(
-                    source=SOURCE,
-                    external_id=str(item["id"]),
-                    channel=thread_subject(subject) or "(no subject)",
-                    author=_author(headers.get("from", "")),
-                    sent_at=datetime.fromtimestamp(int(item["internalDate"]) / 1000, tz=timezone.utc),
-                    text=text,
-                    raw={
-                        "message_id": item["id"],
-                        "thread_id": item.get("threadId", thread.get("id")),
-                        "label_ids": item.get("labelIds") or [],
-                        "from": headers.get("from", ""),
-                        "to": headers.get("to", ""),
-                        "cc": headers.get("cc", ""),
-                        "date": headers.get("date", ""),
-                        "subject": subject,
-                        "body": original_body,
-                    },
+            message_id = str(item["id"])
+            fields = {
+                "source": SOURCE,
+                "channel": thread_subject(subject) or "(no subject)",
+                "author": _author(headers.get("from", "")),
+                "sent_at": datetime.fromtimestamp(int(item["internalDate"]) / 1000, tz=timezone.utc),
+            }
+            raw = {
+                "message_id": item["id"],
+                "thread_id": item.get("threadId", thread.get("id")),
+                "label_ids": item.get("labelIds") or [],
+                "from": headers.get("from", ""),
+                "to": headers.get("to", ""),
+                "cc": headers.get("cc", ""),
+                "date": headers.get("date", ""),
+                "subject": subject,
+                "body": original_body,
+            }
+            if text:
+                messages.append(NormalizedMessage(external_id=message_id, text=text, raw=raw, **fields))
+            for part in audio_parts(payload):
+                messages.append(
+                    voice_message(parent_id=message_id, attachment=_attachment(part, message_id), raw=raw, **fields)
                 )
-            )
         return messages
 
+    def download_audio(self, attachment: AudioAttachment) -> bytes:
+        """messages.attachments.get; when the stored attachment id no longer works, the message is read again."""
+        if attachment.data is not None:
+            return attachment.data
+        message_id = attachment.ref.get("message_id")
+        if not message_id:
+            raise ConnectorError("Gmail gave no message id for this voice note.")
+        headers = self._auth_headers()
+        attachment_id = attachment.ref.get("attachment_id")
+        if attachment_id:
+            try:
+                return self._attachment_data(message_id, attachment_id, headers)
+            except ConnectorError:
+                pass
+        message = self._get(f"/messages/{message_id}", {"format": "full"}, headers)
+        for part in audio_parts(message.get("payload") or {}):
+            if str(part.get("partId") or part.get("filename")) == attachment.file_id:
+                body = part.get("body") or {}
+                if body.get("attachmentId"):
+                    return self._attachment_data(message_id, body["attachmentId"], headers)
+                if body.get("data"):
+                    return _b64(body["data"])
+        raise ConnectorError("This voice note is no longer in the Gmail message.")
+
+    def _attachment_data(self, message_id: str, attachment_id: str, headers: dict[str, str]) -> bytes:
+        data = self._get(f"/messages/{message_id}/attachments/{attachment_id}", {}, headers)
+        encoded = data.get("data")
+        if not isinstance(encoded, str):
+            raise ConnectorError("Gmail returned an attachment without data.")
+        return _b64(encoded)
+
     def fetch(self, since: datetime | None = None) -> list[NormalizedMessage]:
-        headers = {"Authorization": f"Bearer {self._access_token()}"}
+        headers = self._auth_headers()
         query = self.settings.query
         if since is not None:
             query += f" after:{int((since - SINCE_MARGIN).timestamp())}"
