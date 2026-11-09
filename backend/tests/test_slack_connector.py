@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+from app.connectors.base import AudioAttachment
 from app.connectors.http import ConnectorError
 from app.connectors.slack import API, SlackConnector, SlackSettings, slack_to_text
 from tests.conftest import api_json
@@ -122,3 +123,70 @@ def test_invalid_token():
     with make_connector() as connector, pytest.raises(ConnectorError, match="SLACK_BOT_TOKEN") as exc:
         connector.fetch()
     assert "xoxb-test-token" not in str(exc.value)
+
+
+# ---------- Voice notes ----------
+
+CLIP_URL = "https://files.slack.com/files-pri/T1-F1/download/audio_message.webm"
+
+
+def _voice_channel(router: respx.Router, scopes: str | None, files: list[dict]):
+    lists = api_json("slack/conversations_list_page1.json")
+    lists["response_metadata"] = {"next_cursor": ""}
+    headers = {"x-oauth-scopes": scopes} if scopes is not None else {}
+    router.get(f"{API}/conversations.list").respond(json=lists, headers=headers)
+    channel_id = lists["channels"][0]["id"]
+    history = {
+        "ok": True,
+        "messages": [{"type": "message", "subtype": "file_share", "ts": "1792656000.000100", "user": "U1",
+                      "text": "", "files": files}],
+        "response_metadata": {"next_cursor": ""},
+    }
+    router.get(f"{API}/conversations.history").respond(json=history, headers=headers)
+    return channel_id, lists["channels"][0]["name"]
+
+
+@respx.mock
+def test_audio_clips_and_uploads_become_voice_messages():
+    files = [
+        {"id": "F1", "name": "audio_message.webm", "mimetype": "audio/webm", "subtype": "slack_audio",
+         "duration_ms": 6400, "size": 30000, "url_private_download": CLIP_URL},
+        {"id": "F2", "name": "brief.mp3", "mimetype": "audio/mpeg", "size": 90000,
+         "url_private_download": "https://files.slack.com/files-pri/T1-F2/download/brief.mp3"},
+        {"id": "F3", "name": "mockup.png", "mimetype": "image/png"},
+    ]
+    channel_id, name = _voice_channel(respx.mock, "channels:read,channels:history,files:read", files)
+    with make_connector(f"#{name}") as connector:
+        messages = connector.fetch()
+    assert [m.external_id for m in messages] == [
+        f"{channel_id}:1792656000.000100:audio:F1",
+        f"{channel_id}:1792656000.000100:audio:F2",
+    ]
+    assert all(m.kind == "voice" for m in messages)
+    assert (messages[0].audio.duration, messages[0].audio.url) == (6.4, CLIP_URL)
+    assert "voice_notice" not in connector.state
+
+
+@respx.mock
+def test_missing_files_read_scope_shows_a_notice_instead_of_failing():
+    files = [{"id": "F1", "name": "audio_message.webm", "mimetype": "audio/webm", "subtype": "slack_audio",
+              "url_private_download": CLIP_URL}]
+    _, name = _voice_channel(respx.mock, "channels:read,channels:history", files)
+    with make_connector(f"#{name}") as connector:
+        messages = connector.fetch()
+    assert len(messages) == 1  # the voice note is kept; it waits for the scope
+    assert connector.state["voice_notice"] == "Add files:read to read voice notes"
+
+
+@respx.mock
+def test_download_uses_the_bot_token_and_explains_a_sign_in_page():
+    route = respx.get(CLIP_URL).respond(content=b"fake-webm", headers={"content-type": "audio/webm"})
+    attachment = AudioAttachment(file_id="F1", filename="a.webm", mime_type="audio/webm", url=CLIP_URL)
+    with make_connector() as connector:
+        assert connector.download_audio(attachment) == b"fake-webm"
+    assert route.calls[0].request.headers["Authorization"] == "Bearer xoxb-test-token"
+
+    respx.get(CLIP_URL).respond(html="<html>Sign in to Slack</html>")
+    with make_connector() as connector, pytest.raises(ConnectorError) as exc:
+        connector.download_audio(attachment)
+    assert "Add files:read to read voice notes" in str(exc.value)
