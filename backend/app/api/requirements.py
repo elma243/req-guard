@@ -1,5 +1,5 @@
 """Requirements of a project: AI extraction, list, edit (new version), accept / reject / merge, undo / restore,
-validation (rule-based checks and the pair checks: duplicates, conflicts, change requests).
+validation (rule-based checks and the pair checks: duplicates, conflicts, change requests), and approval.
 
 The pair checks run again for every requirement whose text or status changes, so a merged or rejected one stops
 being compared and accepting one can turn a newer conflict into a change request.
@@ -7,17 +7,30 @@ being compared and accepting one can turn a newer conflict into a change request
 Owner only.
 """
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.ai.llm import LLMClient
+from app.api.clarification_views import answer_out, question_out
 from app.api.deps import CurrentUser, DbSession, OptionalLLM, OwnedProject
-from app.models import Project, Requirement, RequirementSource, RequirementVersion, ValidationFinding
+from app.models import (
+    ClarificationQuestion,
+    Project,
+    Requirement,
+    RequirementApproval,
+    RequirementSource,
+    RequirementVersion,
+    User,
+    ValidationFinding,
+)
 from app.nlp.extraction import extract_requirements
 from app.nlp.pair_checks import check_similarity
 from app.nlp.validate import validate_project, validate_requirement
+from app.schemas.clarification import ApprovalOut, ApproveRequest, ProposalOut
 from app.schemas.extraction import ExtractResult
 from app.schemas.message import VoiceInfo
 from app.schemas.requirement import (
@@ -48,6 +61,12 @@ _LOAD = (
     selectinload(Requirement.versions).selectinload(RequirementVersion.created_by),
     selectinload(Requirement.sources).selectinload(RequirementSource.message),
     selectinload(Requirement.findings),
+    selectinload(Requirement.questions).selectinload(ClarificationQuestion.links),
+    selectinload(Requirement.questions).selectinload(ClarificationQuestion.answers),
+    selectinload(Requirement.questions).selectinload(ClarificationQuestion.finding),
+    selectinload(Requirement.answers),
+    selectinload(Requirement.proposals),
+    selectinload(Requirement.approvals).selectinload(RequirementApproval.approved_by),
 )
 
 
@@ -101,10 +120,15 @@ def _out(r: Requirement) -> RequirementOut:
         open_findings=r.open_findings,
         has_issues=r.has_issues,
         change_request_for=_change_request_for(r),
+        approval=ApprovalOut.model_validate(r.approval) if r.approval else None,
+        open_high_findings=r.open_high_findings,
+        open_questions=sum(1 for q in r.questions if not q.answers),
+        new_answers=r.new_answers,
     )
 
 
 def _detail(r: Requirement) -> RequirementDetail:
+    now = datetime.now(UTC)
     return RequirementDetail(
         **_out(r).model_dump(exclude={"sources"}),
         sources=[
@@ -118,17 +142,70 @@ def _detail(r: Requirement) -> RequirementDetail:
         ],
         versions=[RequirementVersionOut.model_validate(v) for v in r.versions],
         findings=[ValidationFindingOut.model_validate(f) for f in r.findings],
+        questions=[question_out(q, now) for q in r.questions],
+        answers=[answer_out(a) for a in r.answers],
+        proposals=[ProposalOut.model_validate(p) for p in r.proposals],
     )
 
 
-def _ensure_changeable(requirement: Requirement, *, editing: bool) -> None:
-    """Merged requirements are closed; rejected ones can change status but not get new content."""
+def _ensure_changeable(requirement: Requirement, *, editing: bool, new_version: bool = False) -> None:
+    """Merged requirements are closed; rejected ones can change status but not get new content.
+
+    An approved requirement is locked: only a new version (which ends the approval) may change it.
+    """
     if requirement.status == "merged":
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail=f"{requirement.code} was merged into another requirement"
         )
     if editing and requirement.status == "rejected":
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"{requirement.code} is rejected and cannot be edited")
+    if requirement.approval is not None and not new_version:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail=f"{requirement.code} is approved. Remove the approval first."
+        )
+
+
+def add_user_version(
+    db: Session,
+    project: Project,
+    requirement: Requirement,
+    user: User,
+    changes: dict,
+    llm: LLMClient | None,
+) -> RequirementVersion:
+    """Save a person's change as a new version (rule 6), mark the requirement edited and validate it again.
+
+    The approval in force ends: it was for the old text. The caller commits.
+    """
+    _ensure_changeable(requirement, editing=True, new_version=True)
+    current = requirement.current
+    new_type = changes.get("type") or current.type
+    category = changes["nfr_category"] if "nfr_category" in changes else current.nfr_category
+    if new_type == "functional":
+        category = None
+    elif category is None:
+        category = "other"
+    approval = requirement.approval
+    if approval is not None:
+        approval.revoked_at = datetime.now(UTC)
+        approval.revoked_reason = "new version"
+    version = RequirementVersion(
+        version=current.version + 1,
+        statement=changes.get("statement") or current.statement,
+        type=new_type,
+        nfr_category=category,
+        actor=changes["actor"] if changes.get("actor") is not None else current.actor,
+        confidence=None,
+        origin="user",
+        created_by_id=user.id,
+    )
+    requirement.versions.append(version)
+    requirement.status = "edited"
+    requirement.previous_status = None  # an undo must not jump over this edit
+    validate_requirement(requirement, project)
+    db.flush()  # the new version needs its id for the embedding
+    check_similarity(db, project, [requirement.id], llm)
+    return version
 
 
 @router.post("/extract", response_model=ExtractResult)
@@ -243,34 +320,11 @@ def edit_requirement(
     user: CurrentUser,
     llm: OptionalLLM,
 ) -> RequirementDetail:
-    """Save the change as a new version (the old versions stay as they are) and mark the requirement edited."""
+    """Save the change as a new version (the old versions stay as they are) and mark the requirement edited.
+
+    An approved requirement loses its approval: the new text has to be approved again."""
     requirement = _get(db, project, requirement_id)
-    _ensure_changeable(requirement, editing=True)
-    current = requirement.current
-    changes = body.model_dump(exclude_unset=True)
-    new_type = changes.get("type") or current.type
-    category = changes["nfr_category"] if "nfr_category" in changes else current.nfr_category
-    if new_type == "functional":
-        category = None
-    elif category is None:
-        category = "other"
-    requirement.versions.append(
-        RequirementVersion(
-            version=current.version + 1,
-            statement=changes.get("statement") or current.statement,
-            type=new_type,
-            nfr_category=category,
-            actor=changes["actor"] if changes.get("actor") is not None else current.actor,
-            confidence=None,
-            origin="user",
-            created_by_id=user.id,
-        )
-    )
-    requirement.status = "edited"
-    requirement.previous_status = None  # an undo must not jump over this edit
-    validate_requirement(requirement, project)
-    db.flush()  # the new version needs its id for the embedding
-    check_similarity(db, project, [requirement.id], llm)
+    add_user_version(db, project, requirement, user, body.model_dump(exclude_unset=True), llm)
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -318,6 +372,73 @@ def undo_review(requirement_id: int, project: OwnedProject, db: DbSession, llm: 
     """Take back the last accept / reject: the status returns to what it was."""
     _undo(_get(db, project, requirement_id))
     check_similarity(db, project, [requirement_id], llm)
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
+
+
+APPROVABLE = ("accepted", "edited")
+
+
+@router.post("/{requirement_id}/approve", response_model=RequirementDetail)
+def approve_requirement(
+    requirement_id: int,
+    project: OwnedProject,
+    db: DbSession,
+    user: CurrentUser,
+    body: ApproveRequest | None = None,
+) -> RequirementDetail:
+    """Approve the current version (the project owner is the team lead). Separate from accepting.
+
+    Open High findings block it, unless an override reason is given; the reason and those findings are recorded.
+    """
+    requirement = _get(db, project, requirement_id)
+    if requirement.status not in APPROVABLE:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Only accepted or edited requirements can be approved; {requirement.code} is {requirement.status}.",
+        )
+    if requirement.approval is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"{requirement.code} is already approved")
+    reason = (body.override_reason if body else None) or None
+    high = requirement.open_high
+    if high and reason is None:
+        listed = "; ".join(_high_label(f) for f in high[:3]) + ("; ..." if len(high) > 3 else "")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"{len(high)} open High finding{'' if len(high) == 1 else 's'} ({listed}). "
+                "Resolve or reject them, or give a reason to approve anyway."
+            ),
+        )
+    requirement.approvals.append(
+        RequirementApproval(
+            version=requirement.current.version,
+            approved_by_id=user.id,
+            approved_at=datetime.now(UTC),
+            override_reason=reason if high else None,
+            open_high_finding_ids=[f.id for f in high],
+        )
+    )
+    db.commit()
+    return _detail(_get(db, project, requirement_id))
+
+
+def _high_label(f: ValidationFinding) -> str:
+    """A finding in cautious words, e.g. "possible conflict with REQ-003"."""
+    if f.category == "conflict":
+        return f"possible conflict with {f.related_code}" if f.related_code else "possible conflict"
+    return {"missing_info": "possible missing information"}.get(f.category, f"possible {f.category.replace('_', ' ')}")
+
+
+@router.post("/{requirement_id}/unapprove", response_model=RequirementDetail)
+def unapprove_requirement(requirement_id: int, project: OwnedProject, db: DbSession) -> RequirementDetail:
+    """Take the approval back; it stays in the record as revoked."""
+    requirement = _get(db, project, requirement_id)
+    approval = requirement.approval
+    if approval is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"{requirement.code} is not approved")
+    approval.revoked_at = datetime.now(UTC)
+    approval.revoked_reason = "unapproved"
     db.commit()
     return _detail(_get(db, project, requirement_id))
 
@@ -377,7 +498,7 @@ def merge_requirements(
 ) -> RequirementDetail:
     """Fold other requirements into this one: their source sentences are added here, they become "merged"."""
     target = _get(db, project, requirement_id)
-    _ensure_changeable(target, editing=True)
+    _ensure_changeable(target, editing=True)  # approved targets are locked too
     other_ids = list(dict.fromkeys(body.other_ids))
     if requirement_id in other_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="A requirement cannot be merged into itself")
