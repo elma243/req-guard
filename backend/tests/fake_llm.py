@@ -1,5 +1,5 @@
-"""A stand-in for LLMClient: answers "extract_requirements" from a fixture table and "classify_pairs" from
-`relations`, never calls an API."""
+"""A stand-in for LLMClient: answers "extract_requirements" from a fixture table, "classify_pairs" from
+`relations`, and the clarification prompts from settable answers; never calls an API."""
 
 import json
 from pathlib import Path
@@ -30,6 +30,15 @@ class FakeLLM(LLMClient):
         self.default_relation = "not_enough_information"
         self.pairs_fail = False
         self.pair_calls: list[list[dict]] = []
+        # Clarification questions: requirement id -> its answer ({"questions": [...], "not_enough_information"}).
+        # Requirements not in the table get one question per finding.
+        self.question_answers: dict[int, dict] = {}
+        self.question_calls: list[list[dict]] = []
+        self.questions_fail: Exception | None = None
+        # Proposals: the answer to "clarification_proposal"
+        self.proposal: dict = {"statement": "", "not_enough_information": True, "reason": "Fake: nothing to add."}
+        self.proposal_calls: list[dict] = []
+        self.proposal_fail: Exception | None = None
 
     def relate(self, older: str, newer: str, relation: str) -> None:
         self.relations[(older, newer)] = relation
@@ -45,9 +54,36 @@ class FakeLLM(LLMClient):
             answers.append({"pair_id": pair["pair_id"], "relation": relation, "reason": f"Fake reason: {relation}."})
         return schema.model_validate({"pairs": answers})
 
+    def _clarification_questions(self, variables, schema):
+        self.question_calls.append(variables["requirements"])
+        if self.questions_fail:
+            raise self.questions_fail
+        self.last_model = self.model
+        answers = []
+        for item in variables["requirements"]:
+            default = {
+                "questions": [
+                    {"finding_id": f["finding_id"], "text": f'Could you tell us more about "{f["evidence"]}"?'}
+                    for f in item["findings"]
+                ]
+            }
+            answers.append({"requirement_id": item["requirement_id"], **self.question_answers.get(item["requirement_id"], default)})
+        return schema.model_validate({"requirements": answers})
+
+    def _clarification_proposal(self, variables, schema):
+        self.proposal_calls.append(variables)
+        if self.proposal_fail:
+            raise self.proposal_fail
+        self.last_model = self.model
+        return schema.model_validate(self.proposal)
+
     def complete_json(self, prompt_name, variables, schema, **options):
         if prompt_name == "classify_pairs":
             return self._classify_pairs(variables, schema)
+        if prompt_name == "clarification_questions":
+            return self._clarification_questions(variables, schema)
+        if prompt_name == "clarification_proposal":
+            return self._clarification_proposal(variables, schema)
         assert prompt_name == "extract_requirements"
         self.calls.append(variables)
         self.options.append(options)

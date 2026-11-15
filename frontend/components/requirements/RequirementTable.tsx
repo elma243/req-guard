@@ -2,7 +2,19 @@
 
 import { useEffect } from "react";
 import type { Requirement } from "@/lib/api";
-import { ChangeRequestBadge, Confidence, ModelBadge, NFR_LABELS, ReviewBadge, ScoreBadge, SourceLine, StatusBadge, typeLabel } from "./labels";
+import {
+  ApprovedBadge,
+  ChangeRequestBadge,
+  Confidence,
+  ModelBadge,
+  NFR_LABELS,
+  NewAnswersBadge,
+  ReviewBadge,
+  ScoreBadge,
+  SourceLine,
+  StatusBadge,
+  typeLabel,
+} from "./labels";
 
 type TableProps = {
   rows: Requirement[];
@@ -199,6 +211,11 @@ function Row({
             <ChangeRequestBadge requirement={r} />
           </p>
         )}
+        {r.new_answers > 0 && (
+          <p className="mt-1.5">
+            <NewAnswersBadge count={r.new_answers} />
+          </p>
+        )}
         <ul className="mt-2 space-y-2">
           {r.sources.map((s) => (
             <li key={`${s.message_id}-${s.source_sentence}`} className="border-l-2 border-white/10 pl-3">
@@ -233,6 +250,11 @@ function Row({
         <div className="mt-1.5">
           <ReviewBadge requirement={r} />
         </div>
+        {r.approval && (
+          <div className="mt-1.5">
+            <ApprovedBadge requirement={r} />
+          </div>
+        )}
         {r.version_count > 1 && <p className="mt-1 text-xs text-zinc-500">v{r.version_count}</p>}
       </td>
     </tr>

@@ -28,7 +28,9 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 import app.models  # noqa: E402, F401  (registers models on Base.metadata)
 from app.core.db import Base, get_db  # noqa: E402
-from app.api.deps import get_optional_llm_client  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+
+from app.api.deps import get_llm_client, get_optional_llm_client  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ai import llm, speech  # noqa: E402
 from app.connectors import http as connector_http  # noqa: E402
@@ -67,6 +69,11 @@ def no_auth_rate_limit(monkeypatch):
 def no_real_llm(override_db):
     """Endpoints get no LLM unless a test sets one: backend/.env may hold a real key."""
     app.dependency_overrides[get_optional_llm_client] = lambda: None
+    app.dependency_overrides[get_llm_client] = _no_llm
+
+
+def _no_llm():
+    raise HTTPException(status_code=503, detail="No AI model is configured (test default).")
 
 
 @pytest.fixture(autouse=True)

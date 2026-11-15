@@ -2,6 +2,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.schemas.clarification import AnswerOut, ApprovalOut, ProposalOut, QuestionOut
 from app.schemas.common import UtcDatetime
 from app.schemas.message import VoiceInfo
 from app.schemas.extraction import NfrCategory
@@ -122,12 +123,22 @@ class RequirementOut(BaseModel):
     has_issues: bool
     # The accepted requirement this one may change (an open change request finding); None otherwise
     change_request_for: RequirementRef | None = None
+    # Step 8A. The approval in force (for the current version), or None
+    approval: ApprovalOut | None = None
+    # Open findings with severity high: approving over them needs a reason
+    open_high_findings: int = 0
+    # Clarification questions not answered yet, and client answers the lead has not seen
+    open_questions: int = 0
+    new_answers: int = 0
 
 
 class RequirementDetail(RequirementOut):
     sources: list[RequirementSourceDetail]
     versions: list[RequirementVersionOut]  # oldest first
     findings: list[ValidationFindingOut]
+    questions: list[QuestionOut] = []
+    answers: list[AnswerOut] = []  # the Q&A thread, oldest first
+    proposals: list[ProposalOut] = []
 
 
 class RequirementUpdate(BaseModel):

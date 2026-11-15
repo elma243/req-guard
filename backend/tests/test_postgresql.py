@@ -327,3 +327,65 @@ def test_embeddings_skip_versions_deleted_meanwhile_on_postgresql(pg):
         select(RequirementEmbedding.version_id).where(RequirementEmbedding.version_id.in_([kept.id, gone.id]))
     ).all()
     assert stored == [kept.id]
+
+
+CLARIFICATION_TABLES = (
+    "clarification_questions",
+    "clarification_links",
+    "clarification_link_questions",
+    "clarification_answers",
+    "clarification_proposals",
+    "requirement_approvals",
+)
+
+
+def test_clarification_tables_have_row_level_security(pg):
+    rows = pg.execute(
+        text("SELECT relname, relrowsecurity FROM pg_class WHERE relname = ANY(:names)"),
+        {"names": list(CLARIFICATION_TABLES)},
+    ).all()
+    assert dict(rows) == {name: True for name in CLARIFICATION_TABLES}
+
+
+def test_clarification_flow_on_postgresql(pg, client, make_user):
+    """Questions, a link, the client's Banglish answer, the accepted proposal and an approval over a High finding."""
+    from tests.clarify_helpers import use_llm
+
+    _, headers = make_user()
+    project = client.post("/projects", json={"name": "PG clarify"}, headers=headers).json()
+    base = f"/projects/{project['id']}"
+    app.dependency_overrides[get_optional_llm_client] = lambda: None
+    chat = "20/10/26, 10:05 - Karim: Report taratari load hote hobe.\n"
+    files = [("files", ("WhatsApp Chat with Karim.txt", chat.encode(), "text/plain"))]
+    assert client.post(f"{base}/uploads", files=files, headers=headers).status_code == 200
+    assert client.post(f"{base}/requirements/extract", headers=headers).status_code == 200
+    rid = client.get(f"{base}/requirements", headers=headers).json()[0]["id"]
+    assert client.post(f"{base}/requirements/{rid}/accept", headers=headers).status_code == 200
+
+    fake = use_llm()
+    generated = client.post(f"{base}/requirements/{rid}/questions/generate", headers=headers)
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["created"] >= 1
+    qids = [q["id"] for q in client.get(f"{base}/clarifications/questions", headers=headers).json()]
+    link = client.post(f"{base}/clarifications/links", json={"question_ids": qids}, headers=headers)
+    assert link.status_code == 201, link.text
+    token = link.json()["url"].rsplit("/", 1)[1]
+    assert client.get(f"/public/clarify/{token}").status_code == 200
+    answer = {"answers": [{"question_id": qids[0], "text": "2 second er moddhe, রিপোর্ট"}]}
+    assert client.post(f"/public/clarify/{token}/answers", json=answer).status_code == 200
+    assert client.post(f"/public/clarify/{token}/answers", json=answer).status_code == 410
+    assert client.get(f"{base}/clarifications/unseen", headers=headers).json() == {"count": 1}
+
+    fake.proposal = {"statement": "The system shall load the report within 2 seconds.", "reason": "Adds 2 seconds."}
+    proposal = client.post(f"{base}/requirements/{rid}/proposals", headers=headers)
+    assert proposal.status_code == 200, proposal.text
+    pid = proposal.json()["proposals"][-1]["id"]
+    accepted = client.post(f"{base}/requirements/{rid}/proposals/{pid}/accept", headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["version_count"] == 2 and accepted.json()["answers"][0]["text"] == answer["answers"][0]["text"]
+
+    approved = client.post(
+        f"{base}/requirements/{rid}/approve", json={"override_reason": "Checked with the client."}, headers=headers
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approval"]["version"] == 2

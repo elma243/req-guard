@@ -471,12 +471,19 @@ export type Requirement = {
   open_findings: number; // findings not rejected by a person
   has_issues: boolean; // open requirement with findings or failed criteria
   change_request_for: { id: number; code: string } | null; // the accepted requirement this one may change
+  approval: Approval | null; // the approval in force (for the current version)
+  open_high_findings: number; // approving over them needs a reason
+  open_questions: number; // clarification questions not answered yet
+  new_answers: number; // client answers the lead has not seen
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
   sources: (RequirementSource & { message_text: string; has_audio: boolean; voice: VoiceInfo | null })[];
   versions: RequirementVersion[]; // oldest first
   findings: ValidationFinding[];
+  questions: ClarificationQuestion[];
+  answers: ClarificationAnswer[]; // the Q&A thread, oldest first
+  proposals: Proposal[];
 };
 
 export type RequirementUpdate = {
@@ -624,5 +631,202 @@ export function bulkRequirements(projectId: number | string, ids: number[], acti
   return apiFetch<BulkResult>(`/projects/${projectId}/requirements/bulk`, {
     method: "POST",
     body: json({ ids, action, reason }),
+  });
+}
+
+// ---------- Approval ----------
+
+export type Approval = {
+  id: number;
+  version: number;
+  approved_by_name: string | null;
+  approved_at: string;
+  override_reason: string | null; // set when open High findings were approved over
+  open_high_finding_ids: number[];
+};
+
+// Only accepted or edited requirements; with open High findings an override reason is needed
+export function approveRequirement(projectId: number | string, id: number, overrideReason?: string) {
+  return requirementAction(projectId, id, "approve", overrideReason ? { override_reason: overrideReason } : undefined);
+}
+
+export function unapproveRequirement(projectId: number | string, id: number) {
+  return requirementAction(projectId, id, "unapprove");
+}
+
+// ---------- Clarifications ----------
+
+// draft: in no active link; shared: in an active link; answered: the client answered it
+export type QuestionState = "draft" | "shared" | "answered";
+
+export type ClarificationQuestion = {
+  id: number;
+  requirement_id: number;
+  requirement_code: string;
+  finding_id: number | null; // null: written without a finding, or the finding was resolved by a re-validation
+  finding_category: FindingCategory | null;
+  finding_reason: string | null;
+  text: string;
+  origin: "ai" | "user";
+  status: "suggested" | "edited" | "accepted" | "rejected";
+  ai_model: string | null;
+  state: QuestionState;
+  answer_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClarificationAnswer = {
+  id: number;
+  question_id: number;
+  question_text: string;
+  requirement_id: number;
+  link_id: number | null;
+  text: string; // exactly as the client wrote it
+  answered_at: string;
+  seen_at: string | null; // null: new
+};
+
+export type Proposal = {
+  id: number;
+  requirement_id: number;
+  based_on_version: number;
+  answer_ids: number[];
+  statement: string | null; // null when the AI found not enough information
+  reason: string;
+  not_enough_information: boolean;
+  ai_model: string | null;
+  origin: "ai" | "user";
+  status: "suggested" | "accepted" | "edited" | "rejected";
+  decided_at: string | null;
+  version_id: number | null;
+  created_at: string;
+};
+
+export type GenerateQuestionsResult = {
+  created: number;
+  items: { requirement_id: number; code: string; created: number; not_enough_information: boolean }[];
+  error: string | null; // a later batch failed; the earlier questions were kept
+};
+
+export type LinkState = "active" | "expired" | "revoked" | "answered";
+
+export type ClarificationLink = {
+  id: number;
+  state: LinkState;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  submitted_at: string | null;
+  questions: { id: number; requirement_id: number; requirement_code: string; text: string }[];
+};
+
+// The only time the address is shown: just a hash of its token is stored
+export type CreatedLink = ClarificationLink & { url: string };
+
+export const MAX_LINK_QUESTIONS = 20;
+export const MAX_QUESTION_CHARS = 300;
+export const MAX_ANSWER_CHARS = 2000;
+
+// Every open requirement whose findings have no question yet
+export function generateAllQuestions(projectId: number | string) {
+  return apiFetch<GenerateQuestionsResult>(`/projects/${projectId}/clarifications/generate`, { method: "POST" });
+}
+
+// This requirement's untouched AI questions are written again; edited, shared and answered ones stay
+export function generateQuestions(projectId: number | string, requirementId: number) {
+  return apiFetch<GenerateQuestionsResult>(`/projects/${projectId}/requirements/${requirementId}/questions/generate`, {
+    method: "POST",
+  });
+}
+
+export function listQuestions(projectId: number | string) {
+  return apiFetch<ClarificationQuestion[]>(`/projects/${projectId}/clarifications/questions`);
+}
+
+export function addQuestion(projectId: number | string, requirementId: number, text: string, findingId?: number) {
+  return apiFetch<ClarificationQuestion>(`/projects/${projectId}/requirements/${requirementId}/questions`, {
+    method: "POST",
+    body: json({ text, finding_id: findingId ?? null }),
+  });
+}
+
+export function editQuestion(projectId: number | string, questionId: number, text: string) {
+  return apiFetch<ClarificationQuestion>(`/projects/${projectId}/clarifications/questions/${questionId}`, {
+    method: "PATCH",
+    body: json({ text }),
+  });
+}
+
+export function deleteQuestion(projectId: number | string, questionId: number) {
+  return apiFetch<void>(`/projects/${projectId}/clarifications/questions/${questionId}`, { method: "DELETE" });
+}
+
+export function createLink(projectId: number | string, questionIds: number[]) {
+  return apiFetch<CreatedLink>(`/projects/${projectId}/clarifications/links`, {
+    method: "POST",
+    body: json({ question_ids: questionIds }),
+  });
+}
+
+export function listLinks(projectId: number | string) {
+  return apiFetch<ClarificationLink[]>(`/projects/${projectId}/clarifications/links`);
+}
+
+export function revokeLink(projectId: number | string, linkId: number) {
+  return apiFetch<ClarificationLink>(`/projects/${projectId}/clarifications/links/${linkId}/revoke`, {
+    method: "POST",
+  });
+}
+
+export function getUnseenAnswers(projectId: number | string) {
+  return apiFetch<{ count: number }>(`/projects/${projectId}/clarifications/unseen`);
+}
+
+export function markAnswersSeen(projectId: number | string, requirementId: number) {
+  return requirementAction(projectId, requirementId, "answers/seen");
+}
+
+// The AI proposes an updated statement from the answers not used yet
+export function proposeUpdate(projectId: number | string, requirementId: number) {
+  return requirementAction(projectId, requirementId, "proposals");
+}
+
+// statement: the lead's edited text; omitted to accept the AI's text as it is
+export function acceptProposal(
+  projectId: number | string,
+  requirementId: number,
+  proposalId: number,
+  statement?: string,
+) {
+  return requirementAction(
+    projectId,
+    requirementId,
+    `proposals/${proposalId}/accept`,
+    statement ? { statement } : undefined,
+  );
+}
+
+export function rejectProposal(projectId: number | string, requirementId: number, proposalId: number) {
+  return requirementAction(projectId, requirementId, `proposals/${proposalId}/reject`);
+}
+
+// ---------- The client's clarification page (no login) ----------
+
+export type PublicClarification = {
+  project_name: string;
+  expires_at: string;
+  questions: { id: number; text: string }[];
+};
+
+// Straight through the backend route without apiFetch's 401 redirect: the client has no account
+export function getPublicClarification(token: string) {
+  return request<PublicClarification>(`/api/backend/public/clarify/${encodeURIComponent(token)}`);
+}
+
+export function submitClarificationAnswers(token: string, answers: { question_id: number; text: string }[]) {
+  return request<{ answered: number }>(`/api/backend/public/clarify/${encodeURIComponent(token)}/answers`, {
+    method: "POST",
+    body: json({ answers }),
   });
 }

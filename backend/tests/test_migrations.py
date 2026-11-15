@@ -96,6 +96,35 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     ]
     assert [(fk["referred_table"], fk["options"].get("ondelete")) for fk in merged_from] == [("requirements", "SET NULL")]
 
+    # Step 8A: clarifications and approvals
+    assert {
+        "clarification_questions",
+        "clarification_links",
+        "clarification_link_questions",
+        "clarification_answers",
+        "clarification_proposals",
+        "requirement_approvals",
+    } <= set(inspect(engine).get_table_names())
+    assert {c["name"] for c in inspect(engine).get_check_constraints("clarification_questions")} == {
+        "ck_clarification_questions_origin",
+        "ck_clarification_questions_status",
+    }
+    assert {u["column_names"][0] for u in inspect(engine).get_unique_constraints("clarification_links")} == {
+        "token_hash"
+    }
+    assert on_delete("clarification_questions", "requirements") == "CASCADE"
+    assert on_delete("clarification_questions", "validation_findings") == "SET NULL"
+    assert on_delete("clarification_links", "projects") == "CASCADE"
+    assert on_delete("clarification_link_questions", "clarification_links") == "CASCADE"
+    assert on_delete("clarification_answers", "clarification_questions") == "CASCADE"
+    assert on_delete("clarification_answers", "clarification_links") == "SET NULL"
+    assert on_delete("clarification_proposals", "requirement_versions") == "SET NULL"
+    assert on_delete("requirement_approvals", "requirements") == "CASCADE"
+
+    command.downgrade(config, "d8e9f0a1b2c3")
+    assert "clarification_questions" not in inspect(engine).get_table_names()
+    command.upgrade(config, "head")
+
     command.downgrade(config, "base")
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
     engine.dispose()

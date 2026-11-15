@@ -108,3 +108,27 @@ export function SourceLine({ source: s }: { source: RequirementSource & { voice?
     </p>
   );
 }
+
+// The lead approved the current version (separate from accepted). "with override" when High findings were open.
+export function ApprovedBadge({ requirement: r }: { requirement: Requirement }) {
+  if (!r.approval) return null;
+  const override = r.approval.override_reason !== null;
+  return (
+    <span
+      className={`${BADGE} bg-teal-400/10 text-teal-300 ring-teal-400/30`}
+      title={override ? `Approved over open High findings: ${r.approval.override_reason}` : undefined}
+    >
+      Approved{override && " (override)"}
+    </span>
+  );
+}
+
+// Client answers the lead has not opened yet
+export function NewAnswersBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span className={`${BADGE} bg-indigo-400/15 text-indigo-200 ring-indigo-400/40`}>
+      {count === 1 ? "New answer" : `${count} new answers`}
+    </span>
+  );
+}

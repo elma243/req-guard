@@ -1,6 +1,13 @@
 """SQLAlchemy models. Import every model module here so Alembic can find it."""
 
 from app.models.auth_token import EmailOtp, PasswordResetToken
+from app.models.clarification import (
+    ClarificationAnswer,
+    ClarificationLink,
+    ClarificationProposal,
+    ClarificationQuestion,
+    RequirementApproval,
+)
 from app.models.embedding import RequirementEmbedding
 from app.models.message import Message
 from app.models.pair_verdict import PairVerdict
@@ -13,12 +20,17 @@ from app.models.validation import ValidationFinding
 from app.models.voice_audio import VoiceAudio
 
 __all__ = [
+    "ClarificationAnswer",
+    "ClarificationLink",
+    "ClarificationProposal",
+    "ClarificationQuestion",
     "EmailOtp",
     "Message",
     "PairVerdict",
     "PasswordResetToken",
     "Project",
     "Requirement",
+    "RequirementApproval",
     "RequirementEmbedding",
     "RequirementSource",
     "RequirementVersion",

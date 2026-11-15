@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ShieldIcon } from "@/components/AuthShell";
 import { getHealth, getMe, listProjects, logout, type Project, type User } from "@/lib/api";
+import { useUnseenAnswers } from "@/lib/newAnswers";
 import { useUnseenMessages } from "@/lib/newMessages";
 import { readSelected, setSelectedProject, useSelectedProject } from "@/lib/selectedProject";
 
@@ -13,6 +14,7 @@ const LINKS = [
   { href: "/sources", label: "Sources" },
   { href: "/messages", label: "Messages" },
   { href: "/requirements", label: "Requirements" },
+  { href: "/clarifications", label: "Clarifications" },
   { href: "/test-cases", label: "Test Cases" },
   { href: "/tasks", label: "Tasks" },
   { href: "/repository", label: "Repository" },
@@ -23,7 +25,10 @@ const LINKS = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const unseen = useUnseenMessages(useSelectedProject());
+  const projectId = useSelectedProject();
+  const unseen = useUnseenMessages(projectId);
+  // Cleared per requirement when its answers are opened, so shown on the page itself too
+  const newAnswers = useUnseenAnswers(projectId);
 
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-white/10 bg-zinc-900/60">
@@ -37,7 +42,9 @@ export default function Sidebar() {
       <nav className="flex-1 space-y-0.5 px-3">
         {LINKS.map((link) => {
           const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
-          const badge = link.href === "/messages" && !active ? unseen : 0;
+          const badge =
+            link.href === "/messages" && !active ? unseen : link.href === "/clarifications" ? newAnswers : 0;
+          const badgeLabel = link.href === "/messages" ? "new messages" : "new client answers";
           return (
             <Link
               key={link.href}
@@ -52,10 +59,10 @@ export default function Sidebar() {
               {badge > 0 && (
                 <span
                   className="ml-auto rounded-full bg-indigo-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
-                  title="New messages from auto-sync"
+                  title={link.href === "/messages" ? "New messages from auto-sync" : "New client answers"}
                 >
                   {badge > 99 ? "99+" : badge}
-                  <span className="sr-only"> new messages</span>
+                  <span className="sr-only"> {badgeLabel}</span>
                 </span>
               )}
             </Link>

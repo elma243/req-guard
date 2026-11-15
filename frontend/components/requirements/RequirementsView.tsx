@@ -20,12 +20,14 @@ import {
   RULE_BASED_NOTICE,
   SIMILARITY_UNAVAILABLE,
   acceptRequirement,
+  approveRequirement,
   bulkRequirements,
   getRequirement,
   listRequirements,
   mergeRequirements,
   rejectRequirement,
   restoreRequirement,
+  unapproveRequirement,
   undoRequirement,
   validateRequirements,
   type Requirement,
@@ -33,6 +35,7 @@ import {
   type RequirementStatus,
   type RequirementType,
 } from "@/lib/api";
+import ApproveDialog from "./ApproveDialog";
 import EditDialog from "./EditDialog";
 import MergeDialog from "./MergeDialog";
 import RejectDialog from "./RejectDialog";
@@ -45,7 +48,11 @@ type StatusFilter = RequirementStatus | "all";
 
 type ReviewAction = "accept" | "reject";
 
-type Dialog = { kind: "reject"; ids: number[] } | { kind: "edit"; id: number } | { kind: "merge"; id: number };
+type Dialog =
+  | { kind: "reject"; ids: number[] }
+  | { kind: "edit"; id: number }
+  | { kind: "merge"; id: number }
+  | { kind: "approve"; id: number };
 
 // Moving quickly through rows only loads the one you stop on
 const DETAIL_DELAY_MS = 120;
@@ -221,6 +228,7 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
     if (r.status === "merged") return `${r.code} is merged. Restore it first.`;
     if (action === "edit" && r.status === "rejected") return `${r.code} is rejected. Restore it before editing.`;
     if (action !== "edit" && r.status === PAST_TENSE[action]) return `${r.code} is already ${r.status}.`;
+    if (action !== "edit" && r.approval) return `${r.code} is approved. Remove the approval first.`;
     return null;
   }
 
@@ -338,7 +346,31 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
   function requestEdit(r: Requirement) {
     const blocked = blockedReason(r, "edit");
     if (blocked) show("info", blocked);
+    else if (r.approval && !window.confirm(`Editing ${r.code} creates a new version and removes its approval. Continue?`)) return;
     else setDialog({ kind: "edit", id: r.id });
+  }
+
+  // Approve (separate from accept). Open High findings need a reason first, asked in a dialog.
+  function requestApprove(r: Requirement) {
+    if (r.open_high_findings > 0) setDialog({ kind: "approve", id: r.id });
+    else void approval(r, "approve");
+  }
+
+  async function approval(r: Requirement, action: "approve" | "unapprove", reason?: string) {
+    if (busy.has(r.id)) return;
+    markBusy([r.id], true);
+    try {
+      applyDetail(
+        action === "approve"
+          ? await approveRequirement(projectId, r.id, reason)
+          : await unapproveRequirement(projectId, r.id),
+      );
+      show("info", action === "approve" ? `${r.code} approved` : `Approval of ${r.code} removed`);
+    } catch (err) {
+      show("error", `${r.code}: ${errorText(err)}`);
+    } finally {
+      markBusy([r.id], false);
+    }
   }
 
   function confirmReject(ids: number[], reason: string) {
@@ -627,6 +659,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
           busy={busy.has(active.id)}
           onOpenRequirement={openAnywhere}
           onMergeInto={(targetId) => void mergeInto(active, targetId)}
+          onDetail={applyDetail}
+          notify={(kind, text) => show(kind, text)}
           actions={
             <PanelActions
               requirement={active}
@@ -636,6 +670,8 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
               onEdit={() => requestEdit(active)}
               onMerge={() => setDialog({ kind: "merge", id: active.id })}
               onRestore={() => void restore(active)}
+              onApprove={() => requestApprove(active)}
+              onUnapprove={() => void approval(active, "unapprove")}
             />
           }
         />
@@ -656,6 +692,16 @@ export default function RequirementsView({ projectId }: { projectId: string }) {
             applyDetail(updated);
             setDialog(null);
             show("info", `${updated.code} saved as version ${updated.current.version}`);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "approve" && dialogRequirement && (
+        <ApproveDialog
+          requirement={dialogRequirement}
+          onConfirm={(reason) => {
+            setDialog(null);
+            void approval(dialogRequirement, "approve", reason);
           }}
           onClose={() => setDialog(null)}
         />
@@ -687,6 +733,8 @@ function PanelActions({
   onEdit,
   onMerge,
   onRestore,
+  onApprove,
+  onUnapprove,
 }: {
   requirement: Requirement;
   disabled: boolean;
@@ -695,17 +743,44 @@ function PanelActions({
   onEdit: () => void;
   onMerge: () => void;
   onRestore: () => void;
+  onApprove: () => void;
+  onUnapprove: () => void;
 }) {
   const open = r.status !== "rejected" && r.status !== "merged";
+  const approved = r.approval !== null;
+  const locked = approved ? "Approved: remove the approval first" : undefined;
+  const canApprove = r.status === "accepted" || r.status === "edited";
   return (
     <div className="flex flex-wrap gap-2">
+      {open && !approved && (
+        <button
+          type="button"
+          onClick={onApprove}
+          disabled={disabled || !canApprove}
+          title={canApprove ? undefined : "Accept or edit it first"}
+          className={primaryButton}
+        >
+          Approve{r.open_high_findings > 0 && "…"}
+        </button>
+      )}
+      {approved && (
+        <button type="button" onClick={onUnapprove} disabled={disabled} className={secondaryButton}>
+          Remove approval
+        </button>
+      )}
       {r.status !== "merged" && (
-        <button type="button" onClick={onAccept} disabled={disabled || r.status === "accepted"} className={primaryButton}>
+        <button
+          type="button"
+          onClick={onAccept}
+          disabled={disabled || r.status === "accepted" || approved}
+          title={locked}
+          className={secondaryButton}
+        >
           Accept
         </button>
       )}
       {open && (
-        <button type="button" onClick={onReject} disabled={disabled} className={dangerButton}>
+        <button type="button" onClick={onReject} disabled={disabled || approved} title={locked} className={dangerButton}>
           Reject
         </button>
       )}
@@ -715,7 +790,7 @@ function PanelActions({
         </button>
       )}
       {open && (
-        <button type="button" onClick={onMerge} disabled={disabled} className={secondaryButton}>
+        <button type="button" onClick={onMerge} disabled={disabled || approved} title={locked} className={secondaryButton}>
           Merge
         </button>
       )}

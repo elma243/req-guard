@@ -19,7 +19,7 @@ const CRITERION_LABELS: Record<string, string> = {
   aligned: "Fits the modules and scope",
 };
 
-const CATEGORY_LABELS: Record<FindingCategory, string> = {
+export const CATEGORY_LABELS: Record<FindingCategory, string> = {
   vague: "Possibly vague",
   missing_info: "Possibly missing information",
   out_of_scope: "Possibly out of scope",

@@ -3,9 +3,11 @@
 import { ErrorBanner, secondaryButton } from "@/components/ui";
 import { VoicePlayer } from "@/components/VoiceNote";
 import type { Requirement, RequirementDetail } from "@/lib/api";
+import Clarifications from "./Clarifications";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
 import {
+  ApprovedBadge,
   ChangeRequestBadge,
   Confidence,
   ModelBadge,
@@ -13,6 +15,7 @@ import {
   ReviewBadge,
   SourceLine,
   StatusBadge,
+  formatTime,
   typeLabel,
 } from "./labels";
 
@@ -31,6 +34,8 @@ export default function RequirementPanel({
   busy = false,
   onOpenRequirement,
   onMergeInto,
+  onDetail,
+  notify,
 }: {
   projectId: string;
   requirement: Requirement;
@@ -45,6 +50,9 @@ export default function RequirementPanel({
   onOpenRequirement?: (id: number) => void;
   // Merge this requirement into another (from a possible-duplicate finding)
   onMergeInto?: (id: number) => void;
+  // A clarification action returned the updated requirement
+  onDetail: (updated: RequirementDetail) => void;
+  notify: (kind: "info" | "error", text: string) => void;
 }) {
   const v = r.current;
   const mergedInto = r.merged_into_id ? codes.get(r.merged_into_id) : undefined;
@@ -58,6 +66,7 @@ export default function RequirementPanel({
         <span className="font-mono text-sm text-zinc-200">{r.code}</span>
         <StatusBadge status={r.status} />
         <ReviewBadge requirement={r} />
+        <ApprovedBadge requirement={r} />
         <button
           type="button"
           aria-label="Close details"
@@ -97,6 +106,18 @@ export default function RequirementPanel({
               <ChangeRequestBadge requirement={r} />
             </p>
           )}
+          {r.approval && (
+            <p className="mt-3 rounded-lg border border-teal-500/20 bg-teal-500/10 px-3 py-2 text-sm text-teal-100">
+              Version {r.approval.version} approved{r.approval.approved_by_name && ` by ${r.approval.approved_by_name}`} on{" "}
+              {formatTime(r.approval.approved_at)}.
+              {r.approval.override_reason && (
+                <span className="mt-1 block text-xs text-teal-200/80">
+                  Approved over {r.approval.open_high_finding_ids.length} open High finding
+                  {r.approval.open_high_finding_ids.length === 1 ? "" : "s"}. Reason: {r.approval.override_reason}
+                </span>
+              )}
+            </p>
+          )}
           {mergedHere.length > 0 && (
             <p className="mt-3 text-xs text-zinc-400">Merged here: {mergedHere.map((m) => m.code).join(", ")}</p>
           )}
@@ -116,6 +137,21 @@ export default function RequirementPanel({
               <Loading detail={detail} what="findings" onRetry={onRetry} />
             )}
           </div>
+        </Section>
+
+        <Section title="Clarification">
+          {detail?.data ? (
+            <Clarifications
+              key={detail.data.id}
+              projectId={projectId}
+              detail={detail.data}
+              disabled={busy}
+              onDetail={onDetail}
+              notify={notify}
+            />
+          ) : (
+            <Loading detail={detail} what="clarification questions" onRetry={onRetry} />
+          )}
         </Section>
 
         <Section title="Source messages">

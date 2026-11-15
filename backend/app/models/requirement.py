@@ -85,6 +85,30 @@ class Requirement(Base):
         order_by="ValidationFinding.id",
         foreign_keys="ValidationFinding.requirement_id",
     )
+    questions: Mapped[list["ClarificationQuestion"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ClarificationQuestion.id",
+    )
+    answers: Mapped[list["ClarificationAnswer"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ClarificationAnswer.id",
+    )
+    proposals: Mapped[list["ClarificationProposal"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ClarificationProposal.id",
+    )
+    approvals: Mapped[list["RequirementApproval"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="RequirementApproval.id",
+    )
 
     @property
     def current(self) -> "RequirementVersion":
@@ -94,6 +118,28 @@ class Requirement(Base):
     def open_findings(self) -> int:
         """Findings no person has rejected."""
         return sum(1 for f in self.findings if f.status != "rejected")
+
+    @property
+    def open_high(self) -> list["ValidationFinding"]:  # noqa: F821
+        """Open (not rejected) findings with severity high: they block approval unless a reason is given."""
+        return [f for f in self.findings if f.severity == "high" and f.status != "rejected"]
+
+    @property
+    def open_high_findings(self) -> int:
+        return len(self.open_high)
+
+    @property
+    def approval(self) -> "RequirementApproval | None":  # noqa: F821
+        """The approval in force: the last one, if not revoked and for the current version."""
+        last = self.approvals[-1] if self.approvals else None
+        if last is None or last.revoked_at is not None or last.version != self.current.version:
+            return None
+        return last
+
+    @property
+    def new_answers(self) -> int:
+        """Client answers the lead has not seen yet."""
+        return sum(1 for a in self.answers if a.seen_at is None)
 
     @property
     def has_issues(self) -> bool:

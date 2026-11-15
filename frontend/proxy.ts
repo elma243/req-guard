@@ -8,12 +8,16 @@ import { TOKEN_COOKIE } from "@/lib/session";
 const GUEST_PAGES = ["/login", "/register", "/verify-email", "/forgot-password"];
 // A reset link must work whatever the browser holds, such as a cookie from a session that has ended
 const OPEN_PAGES = ["/reset-password"];
+// Pages under these prefixes are for people without an account, such as a client answering clarification questions
+const OPEN_PREFIXES = ["/clarify/"];
 
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const loggedIn = request.cookies.has(TOKEN_COOKIE);
   const isGuestPage = GUEST_PAGES.includes(pathname);
-  if (OPEN_PAGES.includes(pathname)) return NextResponse.next();
+  if (OPEN_PAGES.includes(pathname) || OPEN_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+    return NextResponse.next();
+  }
 
   if (!loggedIn && !isGuestPage) {
     const url = new URL("/login", request.url);
