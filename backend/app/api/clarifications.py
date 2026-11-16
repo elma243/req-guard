@@ -18,9 +18,9 @@ from app.ai.clarify import (
     question_state,
     utcnow,
 )
-from app.ai.llm import LLMError, LLMUnavailableError
+from app.ai.llm import LLMError
 from app.api.clarification_views import link_out, question_out
-from app.api.deps import LLM, CurrentUser, DbSession, OptionalLLM, OwnedProject
+from app.api.deps import LLM, CurrentUser, DbSession, OptionalLLM, OwnedProject, llm_error
 from app.api.requirements import _LOAD, _detail, _get, add_user_version
 from app.core.config import settings
 from app.core.ratelimit import client_ip, enforce
@@ -67,11 +67,6 @@ _QUESTION_LOAD = (
 _LINK_LOAD = (selectinload(ClarificationLink.questions).selectinload(ClarificationQuestion.requirement),)
 
 
-def _llm_error(exc: LLMError) -> HTTPException:
-    code = status.HTTP_503_SERVICE_UNAVAILABLE if isinstance(exc, LLMUnavailableError) else status.HTTP_502_BAD_GATEWAY
-    return HTTPException(code, detail=str(exc))
-
-
 def _question(db: Session, project: Project, question_id: int) -> ClarificationQuestion:
     question = db.scalar(
         select(ClarificationQuestion)
@@ -101,7 +96,7 @@ def generate_all(project: OwnedProject, db: DbSession, llm: LLM, body: GenerateR
     try:
         result = generate_questions(_requirements(db, project, ids), llm, replace=False)
     except LLMError as exc:
-        raise _llm_error(exc) from None
+        raise llm_error(exc) from None
     db.commit()
     return result
 
@@ -117,7 +112,7 @@ def generate_for_requirement(requirement_id: int, project: OwnedProject, db: DbS
     try:
         result = generate_questions([requirement], llm, replace=True)
     except LLMError as exc:
-        raise _llm_error(exc) from None
+        raise llm_error(exc) from None
     db.commit()
     return result
 
@@ -291,7 +286,7 @@ def create_proposal(requirement_id: int, project: OwnedProject, db: DbSession, l
     except NoNewAnswers:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="There are no new answers to use") from None
     except LLMError as exc:
-        raise _llm_error(exc) from None
+        raise llm_error(exc) from None
     db.commit()
     return _detail(_get(db, project, requirement_id))
 

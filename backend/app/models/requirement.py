@@ -60,6 +60,9 @@ class Requirement(Base):
     # Best-matching module of the project and how well it matched (0-1); None when none matches
     module_name: Mapped[str | None] = mapped_column(String(100))
     module_score: Mapped[float | None] = mapped_column(Float)
+    # Last AC / TC number given out for this requirement (Step 8B), so codes are never reused
+    criterion_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    test_case_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -109,6 +112,18 @@ class Requirement(Base):
         passive_deletes=True,
         order_by="RequirementApproval.id",
     )
+    criteria: Mapped[list["AcceptanceCriterion"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="AcceptanceCriterion.number",
+    )
+    test_cases: Mapped[list["TestCase"]] = relationship(  # noqa: F821
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TestCase.number",
+    )
 
     @property
     def current(self) -> "RequirementVersion":
@@ -140,6 +155,11 @@ class Requirement(Base):
     def new_answers(self) -> int:
         """Client answers the lead has not seen yet."""
         return sum(1 for a in self.answers if a.seen_at is None)
+
+    @property
+    def live_test_cases(self) -> list["TestCase"]:  # noqa: F821
+        """Test cases no person has rejected."""
+        return [t for t in self.test_cases if t.status != "rejected"]
 
     @property
     def has_issues(self) -> bool:

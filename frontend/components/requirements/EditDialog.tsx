@@ -136,7 +136,11 @@ export default function EditDialog({
         </div>
         <ErrorBanner message={error} />
         <div className="flex items-center justify-between gap-3">
-          <p className="text-xs text-zinc-500">Saved as version {v.version + 1}. The status becomes edited.</p>
+          <p className="text-xs text-zinc-500">
+            Saved as version {v.version + 1}. The status becomes edited.
+            {r.test_case_count > 0 &&
+              ` Its ${r.test_case_count} test case${r.test_case_count === 1 ? "" : "s"} will be marked "needs review".`}
+          </p>
           <div className="flex shrink-0 gap-2">
             <button type="button" onClick={close} className={secondaryButton}>
               Cancel

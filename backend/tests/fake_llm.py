@@ -1,5 +1,5 @@
 """A stand-in for LLMClient: answers "extract_requirements" from a fixture table, "classify_pairs" from
-`relations`, and the clarification prompts from settable answers; never calls an API."""
+`relations`, and the clarification and test case prompts from settable answers; never calls an API."""
 
 import json
 from pathlib import Path
@@ -39,6 +39,13 @@ class FakeLLM(LLMClient):
         self.proposal: dict = {"statement": "", "not_enough_information": True, "reason": "Fake: nothing to add."}
         self.proposal_calls: list[dict] = []
         self.proposal_fail: Exception | None = None
+        # Test cases: statement -> answer. Other statements get `default_test_cases(run)`: 2 criteria and 3 test
+        # cases (positive, negative, edge) whose titles name the run, so a regeneration writes new titles.
+        self.test_case_answers: dict[str, dict] = {}
+        self.test_case_calls: list[dict] = []
+        # Raised on every call, or only on the n-th call (1-based)
+        self.test_cases_fail: Exception | None = None
+        self.test_cases_fail_on: int | None = None
 
     def relate(self, older: str, newer: str, relation: str) -> None:
         self.relations[(older, newer)] = relation
@@ -77,6 +84,15 @@ class FakeLLM(LLMClient):
         self.last_model = self.model
         return schema.model_validate(self.proposal)
 
+    def _test_cases(self, variables, schema):
+        self.test_case_calls.append(variables)
+        run = len(self.test_case_calls)
+        if self.test_cases_fail and (self.test_cases_fail_on in (None, run)):
+            raise self.test_cases_fail
+        self.last_model = self.model
+        statement = variables["requirement"]["statement"]
+        return schema.model_validate(self.test_case_answers.get(statement, default_test_cases(run)))
+
     def complete_json(self, prompt_name, variables, schema, **options):
         if prompt_name == "classify_pairs":
             return self._classify_pairs(variables, schema)
@@ -84,6 +100,8 @@ class FakeLLM(LLMClient):
             return self._clarification_questions(variables, schema)
         if prompt_name == "clarification_proposal":
             return self._clarification_proposal(variables, schema)
+        if prompt_name == "test_cases":
+            return self._test_cases(variables, schema)
         assert prompt_name == "extract_requirements"
         self.calls.append(variables)
         self.options.append(options)
@@ -101,3 +119,38 @@ class FakeLLM(LLMClient):
     @property
     def sentences_sent(self) -> list[str]:
         return [s["text"] for call in self.calls for m in call["batch"] for s in m["sentences"]]
+
+
+def default_test_cases(run: int = 1) -> dict:
+    return {
+        "criteria": [
+            {"ref": "C1", "text": f"A valid request gives the expected result (run {run})."},
+            {"ref": "C2", "text": f"Input at the limit is handled (run {run})."},
+        ],
+        "test_cases": [
+            {
+                "title": f"Valid request works (run {run})",
+                "type": "positive",
+                "given": "a signed-in admin",
+                "when": "they make a valid request",
+                "then": "the expected result is shown",
+                "criterion_ref": "C1",
+            },
+            {
+                "title": f"Invalid request is refused (run {run})",
+                "type": "negative",
+                "given": "a signed-in admin",
+                "when": "they make an invalid request",
+                "then": "a clear error is shown",
+                "criterion_ref": "C1",
+            },
+            {
+                "title": f"Request at the limit (run {run})",
+                "type": "edge",
+                "given": "a signed-in admin",
+                "when": "they make a request exactly at the limit",
+                "then": "it is handled without an error",
+                "criterion_ref": "C2",
+            },
+        ],
+    }

@@ -15,11 +15,14 @@ from app.models.project import Project
 from app.models.requirement import Requirement, RequirementSource, RequirementVersion
 from app.models.source import Source
 from app.models.team_member import TEAM_ROLES, TeamMember
+from app.models.test_case import AcceptanceCriterion, AcceptanceCriterionVersion, TestCase, TestCaseVersion
 from app.models.user import User
 from app.models.validation import ValidationFinding
 from app.models.voice_audio import VoiceAudio
 
 __all__ = [
+    "AcceptanceCriterion",
+    "AcceptanceCriterionVersion",
     "ClarificationAnswer",
     "ClarificationLink",
     "ClarificationProposal",
@@ -37,6 +40,8 @@ __all__ = [
     "Source",
     "TEAM_ROLES",
     "TeamMember",
+    "TestCase",
+    "TestCaseVersion",
     "User",
     "ValidationFinding",
     "VoiceAudio",

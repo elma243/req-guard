@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.ai.llm import LLMClient, LLMNotConfiguredError, get_llm
+from app.ai.llm import LLMClient, LLMError, LLMNotConfiguredError, LLMUnavailableError, get_llm
 from app.core.db import get_db
 from app.core.security import InvalidTokenError, decode_access_token
 from app.models import Project, User
@@ -75,3 +75,9 @@ def get_optional_llm_client() -> LLMClient | None:
 
 
 OptionalLLM = Annotated[LLMClient | None, Depends(get_optional_llm_client)]
+
+
+def llm_error(exc: LLMError) -> HTTPException:
+    """503 when the models are busy or out of quota (try again later), 502 for other LLM failures."""
+    code = status.HTTP_503_SERVICE_UNAVAILABLE if isinstance(exc, LLMUnavailableError) else status.HTTP_502_BAD_GATEWAY
+    return HTTPException(code, detail=str(exc))

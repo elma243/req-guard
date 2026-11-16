@@ -45,3 +45,6 @@ sentence-transformers>=6.0
 
 # pgvector column type for SQLAlchemy (embeddings on PostgreSQL)
 pgvector>=0.5
+
+# PDF export of approved requirements with their acceptance criteria and test cases (Step 8B)
+reportlab>=4.2

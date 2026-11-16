@@ -393,7 +393,7 @@ export type MessageFilters = {
 export function listMessages(projectId: number | string, filters: MessageFilters = {}) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
-    if (value !== undefined && value !== "") params.set(key, String(value));
+    if (value !== undefined) params.set(key, String(value));
   }
   return apiFetch<MessagePage>(`/projects/${projectId}/messages?${params}`);
 }
@@ -475,6 +475,9 @@ export type Requirement = {
   open_high_findings: number; // approving over them needs a reason
   open_questions: number; // clarification questions not answered yet
   new_answers: number; // client answers the lead has not seen
+  test_case_count: number; // test cases not rejected
+  accepted_test_cases: number; // accepted or edited by a person
+  test_cases_need_review: number; // written for an older version of the requirement
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
@@ -809,6 +812,165 @@ export function acceptProposal(
 
 export function rejectProposal(projectId: number | string, requirementId: number, proposalId: number) {
   return requirementAction(projectId, requirementId, `proposals/${proposalId}/reject`);
+}
+
+// ---------- Acceptance criteria and test cases ----------
+
+export const ITEM_STATUSES = ["suggested", "accepted", "edited", "rejected"] as const;
+export type ItemStatus = (typeof ITEM_STATUSES)[number];
+export const TEST_CASE_TYPES = ["positive", "negative", "edge"] as const;
+export type TestCaseType = (typeof TEST_CASE_TYPES)[number];
+
+export type CriterionVersion = {
+  version: number;
+  text: string;
+  origin: "ai" | "user";
+  created_by_name: string | null;
+  created_at: string;
+};
+
+export type AcceptanceCriterion = {
+  id: number;
+  requirement_id: number;
+  code: string; // AC-1, AC-2 ... within the requirement
+  text: string;
+  origin: "ai" | "user";
+  status: ItemStatus;
+  needs_review: boolean; // the requirement changed after it was written
+  requirement_version: number;
+  ai_model: string | null;
+  test_case_count: number; // test cases (not rejected) that verify it
+  versions: CriterionVersion[]; // oldest first
+  created_at: string;
+  updated_at: string;
+};
+
+export type TestCaseVersion = {
+  version: number;
+  title: string;
+  type: TestCaseType;
+  given: string;
+  when: string;
+  then: string;
+  criterion_id: number | null;
+  origin: "ai" | "user";
+  created_by_name: string | null;
+  created_at: string;
+};
+
+export type TestCase = Omit<TestCaseVersion, "version" | "created_by_name"> & {
+  id: number;
+  requirement_id: number;
+  code: string; // TC-1, TC-2 ... within the requirement
+  criterion_code: string | null; // null: none, or removed by a regeneration
+  criterion_status: ItemStatus | null;
+  status: ItemStatus;
+  needs_review: boolean;
+  requirement_version: number;
+  ai_model: string | null;
+  versions: TestCaseVersion[]; // oldest first
+  created_at: string;
+  updated_at: string;
+};
+
+export type TestCaseGroup = {
+  requirement: { id: number; code: string; statement: string; version: number; status: string; approved: boolean };
+  criteria: AcceptanceCriterion[];
+  test_cases: TestCase[];
+};
+
+export type GenerateTestCasesResult = {
+  created_test_cases: number;
+  created_criteria: number;
+  items: {
+    requirement_id: number;
+    code: string;
+    created_test_cases: number;
+    created_criteria: number;
+    not_enough_information: boolean;
+    reason: string;
+  }[];
+  skipped: string[]; // not reached before the time limit: run again
+  error: string | null; // a later call failed; the earlier results were kept
+};
+
+export type TestCaseFilters = {
+  status?: ItemStatus;
+  type?: TestCaseType;
+  requirement_id?: number;
+  needs_review?: boolean;
+};
+
+export type TestCaseInput = {
+  title: string;
+  type: TestCaseType;
+  given: string;
+  when: string;
+  then: string;
+  criterion_id: number | null;
+};
+
+// This requirement's untouched AI suggestions are written again; reviewed and hand-written ones stay
+export function generateTestCases(projectId: number | string, requirementId: number) {
+  return apiFetch<GenerateTestCasesResult>(`/projects/${projectId}/requirements/${requirementId}/test-cases/generate`, {
+    method: "POST",
+  });
+}
+
+// Approved requirements with no test cases yet, or with untouched suggestions written for an older version
+export function generateAllTestCases(projectId: number | string) {
+  return apiFetch<GenerateTestCasesResult>(`/projects/${projectId}/test-cases/generate`, { method: "POST" });
+}
+
+export function listTestCases(projectId: number | string, filters: TestCaseFilters = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const query = params.toString();
+  return apiFetch<TestCaseGroup[]>(`/projects/${projectId}/test-cases${query ? `?${query}` : ""}`);
+}
+
+export function addTestCase(projectId: number | string, requirementId: number, data: TestCaseInput) {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/requirements/${requirementId}/test-cases`, {
+    method: "POST",
+    body: json(data),
+  });
+}
+
+// Saved as a new version written by you
+export function editTestCase(projectId: number | string, testCaseId: number, data: TestCaseInput) {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/test-cases/${testCaseId}`, {
+    method: "PATCH",
+    body: json(data),
+  });
+}
+
+export function reviewTestCase(projectId: number | string, testCaseId: number, action: "accept" | "reject") {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/test-cases/${testCaseId}/${action}`, { method: "POST" });
+}
+
+export function addCriterion(projectId: number | string, requirementId: number, text: string) {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/requirements/${requirementId}/criteria`, {
+    method: "POST",
+    body: json({ text }),
+  });
+}
+
+export function editCriterion(projectId: number | string, criterionId: number, text: string) {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/criteria/${criterionId}`, {
+    method: "PATCH",
+    body: json({ text }),
+  });
+}
+
+export function reviewCriterion(projectId: number | string, criterionId: number, action: "accept" | "reject") {
+  return apiFetch<TestCaseGroup>(`/projects/${projectId}/criteria/${criterionId}/${action}`, { method: "POST" });
+}
+
+// A plain link: the browser downloads the file through the same-origin backend route
+export function testCaseExportUrl(projectId: number | string, format: "csv" | "pdf") {
+  return `/api/backend/projects/${projectId}/test-cases/export.${format}`;
 }
 
 // ---------- The client's clarification page (no login) ----------

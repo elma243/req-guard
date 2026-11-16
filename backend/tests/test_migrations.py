@@ -121,6 +121,27 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("clarification_proposals", "requirement_versions") == "SET NULL"
     assert on_delete("requirement_approvals", "requirements") == "CASCADE"
 
+    # Step 8B: acceptance criteria and test cases
+    test_tables = {"acceptance_criteria", "acceptance_criterion_versions", "test_cases", "test_case_versions"}
+    assert test_tables <= set(inspect(engine).get_table_names())
+    assert {"criterion_counter", "test_case_counter"} <= {c["name"] for c in inspect(engine).get_columns("requirements")}
+    assert {c["name"] for c in inspect(engine).get_check_constraints("test_case_versions")} == {
+        "ck_test_case_versions_origin",
+        "ck_test_case_versions_type",
+    }
+    assert {c["name"] for c in inspect(engine).get_check_constraints("test_cases")} == {
+        "ck_test_cases_origin",
+        "ck_test_cases_status",
+    }
+    assert on_delete("acceptance_criteria", "requirements") == "CASCADE"
+    assert on_delete("acceptance_criterion_versions", "acceptance_criteria") == "CASCADE"
+    assert on_delete("test_cases", "requirements") == "CASCADE"
+    assert on_delete("test_case_versions", "test_cases") == "CASCADE"
+    assert on_delete("test_case_versions", "acceptance_criteria") == "SET NULL"
+
+    command.downgrade(config, "e9f0a1b2c3d4")
+    assert not test_tables & set(inspect(engine).get_table_names())
+    assert "test_case_counter" not in {c["name"] for c in inspect(engine).get_columns("requirements")}
     command.downgrade(config, "d8e9f0a1b2c3")
     assert "clarification_questions" not in inspect(engine).get_table_names()
     command.upgrade(config, "head")

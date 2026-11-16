@@ -15,15 +15,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai.llm import LLMClient
+from app.ai.test_cases import mark_for_review
 from app.api.clarification_views import answer_out, question_out
 from app.api.deps import CurrentUser, DbSession, OptionalLLM, OwnedProject
 from app.models import (
+    AcceptanceCriterion,
     ClarificationQuestion,
     Project,
     Requirement,
     RequirementApproval,
     RequirementSource,
     RequirementVersion,
+    TestCase,
     User,
     ValidationFinding,
 )
@@ -67,6 +70,8 @@ _LOAD = (
     selectinload(Requirement.answers),
     selectinload(Requirement.proposals),
     selectinload(Requirement.approvals).selectinload(RequirementApproval.approved_by),
+    selectinload(Requirement.criteria).selectinload(AcceptanceCriterion.versions),
+    selectinload(Requirement.test_cases).selectinload(TestCase.versions),
 )
 
 
@@ -124,6 +129,9 @@ def _out(r: Requirement) -> RequirementOut:
         open_high_findings=r.open_high_findings,
         open_questions=sum(1 for q in r.questions if not q.answers),
         new_answers=r.new_answers,
+        test_case_count=len(r.live_test_cases),
+        accepted_test_cases=sum(1 for t in r.test_cases if t.status in ("accepted", "edited")),
+        test_cases_need_review=sum(1 for t in r.live_test_cases if t.needs_review),
     )
 
 
@@ -175,7 +183,8 @@ def add_user_version(
 ) -> RequirementVersion:
     """Save a person's change as a new version (rule 6), mark the requirement edited and validate it again.
 
-    The approval in force ends: it was for the old text. The caller commits.
+    The approval in force ends: it was for the old text, and so were the requirement's acceptance criteria and test
+    cases, which are marked "needs review". The caller commits.
     """
     _ensure_changeable(requirement, editing=True, new_version=True)
     current = requirement.current
@@ -200,6 +209,7 @@ def add_user_version(
         created_by_id=user.id,
     )
     requirement.versions.append(version)
+    mark_for_review(requirement)
     requirement.status = "edited"
     requirement.previous_status = None  # an undo must not jump over this edit
     validate_requirement(requirement, project)

@@ -4,6 +4,7 @@ import { ErrorBanner, secondaryButton } from "@/components/ui";
 import { VoicePlayer } from "@/components/VoiceNote";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import Clarifications from "./Clarifications";
+import TestCasesSummary from "./TestCasesSummary";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
 import {
@@ -151,6 +152,20 @@ export default function RequirementPanel({
             />
           ) : (
             <Loading detail={detail} what="clarification questions" onRetry={onRetry} />
+          )}
+        </Section>
+
+        <Section title="Test cases">
+          {detail?.data ? (
+            <TestCasesSummary
+              projectId={projectId}
+              detail={detail.data}
+              disabled={busy}
+              onDetail={onDetail}
+              notify={notify}
+            />
+          ) : (
+            <Loading detail={detail} what="test cases" onRetry={onRetry} />
           )}
         </Section>
 

@@ -389,3 +389,56 @@ def test_clarification_flow_on_postgresql(pg, client, make_user):
     )
     assert approved.status_code == 200, approved.text
     assert approved.json()["approval"]["version"] == 2
+
+
+TEST_CASE_TABLES = ("acceptance_criteria", "acceptance_criterion_versions", "test_cases", "test_case_versions")
+
+
+def test_test_case_tables_have_row_level_security(pg):
+    rows = pg.execute(
+        text("SELECT relname, relrowsecurity FROM pg_class WHERE relname = ANY(:names)"),
+        {"names": list(TEST_CASE_TABLES)},
+    ).all()
+    assert dict(rows) == {name: True for name in TEST_CASE_TABLES}
+
+
+def test_test_case_flow_on_postgresql(pg, client, make_user):
+    """Approve, generate, edit (a new version), accept, regenerate, needs review after an edit, and export."""
+    from tests.clarify_helpers import use_llm
+
+    _, headers = make_user()
+    project = client.post("/projects", json={"name": "PG tests"}, headers=headers).json()
+    base = f"/projects/{project['id']}"
+    app.dependency_overrides[get_optional_llm_client] = lambda: None
+    chat = "20/10/26, 10:05 - Karim: Admin order list CSV export korte parbe.\n"
+    files = [("files", ("WhatsApp Chat with Karim.txt", chat.encode(), "text/plain"))]
+    assert client.post(f"{base}/uploads", files=files, headers=headers).status_code == 200
+    assert client.post(f"{base}/requirements/extract", headers=headers).status_code == 200
+    rid = client.get(f"{base}/requirements", headers=headers).json()[0]["id"]
+    assert client.post(f"{base}/requirements/{rid}/accept", headers=headers).status_code == 200
+    approved = client.post(f"{base}/requirements/{rid}/approve", json={"override_reason": "Demo."}, headers=headers)
+    assert approved.status_code == 200, approved.text
+
+    use_llm()
+    generated = client.post(f"{base}/requirements/{rid}/test-cases/generate", headers=headers)
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["created_test_cases"] == 3
+    group = client.get(f"{base}/test-cases?requirement_id={rid}", headers=headers).json()[0]
+    tc1, tc2 = group["test_cases"][0], group["test_cases"][1]
+    edit = {k: tc2[k] for k in ("title", "type", "given", "when", "then", "criterion_id")} | {"title": "Edited title"}
+    edited = client.patch(f"{base}/test-cases/{tc2['id']}", json=edit, headers=headers)
+    assert edited.status_code == 200, edited.text
+    assert client.post(f"{base}/test-cases/{tc1['id']}/accept", headers=headers).status_code == 200
+    regenerated = client.post(f"{base}/requirements/{rid}/test-cases/generate", headers=headers)
+    assert regenerated.status_code == 200, regenerated.text
+    group = client.get(f"{base}/test-cases?requirement_id={rid}", headers=headers).json()[0]
+    assert [t["code"] for t in group["test_cases"]] == ["TC-1", "TC-2", "TC-4", "TC-5", "TC-6"]
+
+    csv_res = client.get(f"{base}/test-cases/export.csv", headers=headers)
+    assert csv_res.status_code == 200 and "Edited title" in csv_res.content.decode("utf-8-sig")
+    assert client.get(f"{base}/test-cases/export.pdf", headers=headers).content.startswith(b"%PDF")
+
+    statement = client.get(f"{base}/requirements/{rid}", headers=headers).json()["current"]["statement"]
+    patched = client.patch(f"{base}/requirements/{rid}", json={"statement": statement + " (v2)"}, headers=headers)
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["test_cases_need_review"] == 5

@@ -130,6 +130,11 @@ class RequirementOut(BaseModel):
     # Clarification questions not answered yet, and client answers the lead has not seen
     open_questions: int = 0
     new_answers: int = 0
+    # Step 8B: test cases that are not rejected, how many of them are accepted or edited, and how many may be
+    # out of date because the requirement changed after they were written
+    test_case_count: int = 0
+    accepted_test_cases: int = 0
+    test_cases_need_review: int = 0
 
 
 class RequirementDetail(RequirementOut):
