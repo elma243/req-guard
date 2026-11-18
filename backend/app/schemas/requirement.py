@@ -101,6 +101,16 @@ class RequirementRef(BaseModel):
     code: str
 
 
+class RequirementTask(BaseModel):
+    """The requirement's task (Step 9), for the requirement panel."""
+
+    id: int
+    code: str
+    status: str
+    assignee_name: str | None
+    needs_review: bool
+
+
 class RequirementOut(BaseModel):
     id: int
     code: str
@@ -135,6 +145,7 @@ class RequirementOut(BaseModel):
     test_case_count: int = 0
     accepted_test_cases: int = 0
     test_cases_need_review: int = 0
+    task: RequirementTask | None = None
 
 
 class RequirementDetail(RequirementOut):

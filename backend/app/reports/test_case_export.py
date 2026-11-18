@@ -111,19 +111,19 @@ def export_rows(requirements: list[Requirement]) -> list[ExportRequirement]:
     return rows
 
 
-def export_filename(project_name: str, at: datetime, extension: str) -> str:
+def export_filename(project_name: str, at: datetime, extension: str, kind: str = "test-cases") -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", project_name.lower()).strip("-")[:40] or "project"
-    return f"{slug}-test-cases-{at:%Y-%m-%d}.{extension}"
+    return f"{slug}-{kind}-{at:%Y-%m-%d}.{extension}"
 
 
-def _stamp(at: datetime) -> str:
+def stamp(at: datetime) -> str:
     return f"{at:%Y-%m-%d %H:%M} UTC"
 
 
 # ---------- CSV ----------
 
 
-def _cell(value: object) -> str:
+def csv_cell(value: object) -> str:
     """A spreadsheet must not run text from the client as a formula (CSV injection)."""
     text = "" if value is None else str(value)
     return f"'{text}" if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
@@ -133,8 +133,8 @@ def build_csv(project_name: str, at: datetime, rows: list[ExportRequirement]) ->
     """UTF-8 with a byte order mark, so spreadsheet programs show every language correctly."""
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["Project", _cell(project_name)])
-    writer.writerow(["Exported", _stamp(at)])
+    writer.writerow(["Project", csv_cell(project_name)])
+    writer.writerow(["Exported", stamp(at)])
     writer.writerow([])
     writer.writerow(CSV_HEADER)
     for r in rows:
@@ -148,7 +148,7 @@ def build_csv(project_name: str, at: datetime, rows: list[ExportRequirement]) ->
             else:
                 cells = ["", NO_TESTS if criterion is None else "", "", "", "", "", ""]
                 review = bool(criterion and criterion.needs_review)
-            writer.writerow([_cell(v) for v in [*base, *crit, *cells, "yes" if review else ""]])
+            writer.writerow([csv_cell(v) for v in [*base, *crit, *cells, "yes" if review else ""]])
 
         exported = {c.id for c in r.criteria}
         for criterion in r.criteria:
@@ -180,7 +180,7 @@ def build_pdf(project_name: str, at: datetime, rows: list[ExportRequirement]) ->
     story: list = [
         Paragraph("Acceptance criteria and test cases", styles["Title"]),
         Paragraph(f"Project: {_latin(project_name)}", body),
-        Paragraph(f"Exported: {_stamp(at)}", body),
+        Paragraph(f"Exported: {stamp(at)}", body),
         Spacer(1, 3 * mm),
         Paragraph(NOTE, note),
         Spacer(1, 4 * mm),

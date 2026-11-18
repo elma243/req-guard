@@ -26,6 +26,7 @@ from app.models import (
     RequirementApproval,
     RequirementSource,
     RequirementVersion,
+    Task,
     TestCase,
     User,
     ValidationFinding,
@@ -45,6 +46,7 @@ from app.schemas.requirement import (
     RejectRequest,
     RequirementDetail,
     RequirementOut,
+    RequirementTask,
     RequirementRef,
     RequirementSourceDetail,
     RequirementSourceOut,
@@ -72,6 +74,7 @@ _LOAD = (
     selectinload(Requirement.approvals).selectinload(RequirementApproval.approved_by),
     selectinload(Requirement.criteria).selectinload(AcceptanceCriterion.versions),
     selectinload(Requirement.test_cases).selectinload(TestCase.versions),
+    selectinload(Requirement.task).selectinload(Task.assignee),
 )
 
 
@@ -132,7 +135,22 @@ def _out(r: Requirement) -> RequirementOut:
         test_case_count=len(r.live_test_cases),
         accepted_test_cases=sum(1 for t in r.test_cases if t.status in ("accepted", "edited")),
         test_cases_need_review=sum(1 for t in r.live_test_cases if t.needs_review),
+        task=_task(r.task),
     )
+
+
+def _task(t: Task | None) -> RequirementTask | None:
+    if t is None:
+        return None
+    name = t.assignee.name if t.assignee else None
+    return RequirementTask(id=t.id, code=t.code, status=t.status, assignee_name=name, needs_review=t.needs_review)
+
+
+def mark_task_for_review(requirement: Requirement, reason: str) -> None:
+    """Step 9: the task was planned for the approved text; the lead should look at it again."""
+    if requirement.task is not None:
+        requirement.task.needs_review = True
+        requirement.task.needs_review_reason = reason
 
 
 def _detail(r: Requirement) -> RequirementDetail:
@@ -210,6 +228,7 @@ def add_user_version(
     )
     requirement.versions.append(version)
     mark_for_review(requirement)
+    mark_task_for_review(requirement, f"Requirement changed (v{version.version})")
     requirement.status = "edited"
     requirement.previous_status = None  # an undo must not jump over this edit
     validate_requirement(requirement, project)
@@ -449,6 +468,7 @@ def unapprove_requirement(requirement_id: int, project: OwnedProject, db: DbSess
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"{requirement.code} is not approved")
     approval.revoked_at = datetime.now(UTC)
     approval.revoked_reason = "unapproved"
+    mark_task_for_review(requirement, "Approval removed")
     db.commit()
     return _detail(_get(db, project, requirement_id))
 

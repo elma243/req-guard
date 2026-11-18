@@ -40,6 +40,7 @@ JSON_COLUMNS = {
     ("requirements", "quality_failed"),
     ("sources", "config"),
     ("team_members", "skills"),
+    ("tasks", "rejected_member_ids"),
 }
 
 
@@ -442,3 +443,63 @@ def test_test_case_flow_on_postgresql(pg, client, make_user):
     patched = client.patch(f"{base}/requirements/{rid}", json={"statement": statement + " (v2)"}, headers=headers)
     assert patched.status_code == 200, patched.text
     assert patched.json()["test_cases_need_review"] == 5
+
+
+TASK_TABLES = ("task_groups", "tasks")
+
+
+def test_task_tables_have_row_level_security(pg):
+    rows = pg.execute(
+        text("SELECT relname, relrowsecurity FROM pg_class WHERE relname = ANY(:names)"),
+        {"names": list(TASK_TABLES)},
+    ).all()
+    assert dict(rows) == {name: True for name in TASK_TABLES}
+
+
+def test_task_flow_on_postgresql(pg, client, make_user):
+    """Approve, group (module + rule-named cluster), suggest, reject, accept all, status, needs review, export."""
+    _, headers = make_user()
+    project = client.post(
+        "/projects",
+        json={"name": "PG tasks", "modules": [{"name": "Orders", "description": "order list csv"}]},
+        headers=headers,
+    ).json()
+    base = f"/projects/{project['id']}"
+    app.dependency_overrides[get_optional_llm_client] = lambda: None
+    chat = (
+        "20/10/26, 10:05 - Karim: Admin order list CSV export korte parbe.\n"
+        "20/10/26, 10:06 - Karim: Admin sales report PDF download korte parbe.\n"
+    )
+    files = [("files", ("WhatsApp Chat with Karim.txt", chat.encode(), "text/plain"))]
+    assert client.post(f"{base}/uploads", files=files, headers=headers).status_code == 200
+    assert client.post(f"{base}/requirements/extract", headers=headers).status_code == 200
+    rids = [r["id"] for r in client.get(f"{base}/requirements", headers=headers).json()]
+    assert len(rids) >= 1
+    for rid in rids:
+        assert client.post(f"{base}/requirements/{rid}/accept", headers=headers).status_code == 200
+        res = client.post(f"{base}/requirements/{rid}/approve", json={"override_reason": "Demo."}, headers=headers)
+        assert res.status_code == 200, res.text
+    for name, skills in (("Rahim", ["CSV", "Python"]), ("Karim", ["PDF"])):
+        member = {"name": name, "email": f"{name.lower()}@example.com", "skills": skills, "role": "developer"}
+        assert client.post(f"{base}/team", json=member, headers=headers).status_code == 201
+
+    grouped = client.post(f"{base}/tasks/group", headers=headers)
+    assert grouped.status_code == 200, grouped.text
+    assert grouped.json()["created_tasks"] == len(rids)
+    assert grouped.json()["suggested"] == len(rids)
+    first = client.get(f"{base}/tasks", headers=headers).json()["groups"][0]["tasks"][0]
+    rejected = client.post(f"{base}/tasks/{first['id']}/suggestion/reject", headers=headers)
+    assert rejected.status_code == 200, rejected.text
+    assert client.post(f"{base}/tasks/{first['id']}/suggest", headers=headers).status_code == 200
+    accepted = client.post(f"{base}/tasks/accept-suggestions", headers=headers).json()
+    assert accepted["accepted"] == len(rids)
+    moved = client.patch(f"{base}/tasks/{first['id']}", json={"status": "in_progress"}, headers=headers)
+    assert moved.status_code == 200 and moved.json()["status"] == "in_progress"
+
+    assert client.post(f"{base}/requirements/{first['requirement']['id']}/unapprove", headers=headers).status_code == 200
+    data = client.get(f"{base}/tasks?needs_review=true", headers=headers).json()
+    assert [t["id"] for g in data["groups"] for t in g["tasks"]] == [first["id"]]
+    assert sum(w["in_progress"] for w in data["workload"]) == 1
+
+    csv_res = client.get(f"{base}/tasks/export.csv", headers=headers)
+    assert csv_res.status_code == 200 and "Approval removed" in csv_res.content.decode("utf-8-sig")

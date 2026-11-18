@@ -9,7 +9,7 @@ from typing import Any
 from app.connectors.discord import DiscordConnector
 from app.connectors.gmail import GmailConnector
 from app.connectors.http import ApiConnector, NeedsAuthError, NotConfiguredError
-from app.connectors.jira import JiraConnector
+from app.connectors.jira import JiraConnector, JiraIssueCreator
 from app.connectors.slack import SlackConnector
 from app.connectors.telegram import TelegramConnector
 from app.core.config import settings
@@ -81,3 +81,16 @@ def build_connector(source: Source) -> ApiConnector:
         refresh_token=decrypt(source.credentials_encrypted or ""),
         state=state,
     )
+
+
+def jira_base_url() -> str | None:
+    """For links to Jira issues; the URL is not a secret."""
+    return _env("JIRA_BASE_URL").rstrip("/") or None
+
+
+def jira_issue_creator() -> JiraIssueCreator:
+    """Creates issues for "Push to Jira" with the .env credentials. Raises NotConfiguredError."""
+    missing = missing_env(JiraConnector.source)
+    if missing:
+        raise NotConfiguredError(not_configured_message(missing))
+    return JiraIssueCreator(base_url=_env("JIRA_BASE_URL"), email=_env("JIRA_EMAIL"), api_token=_env("JIRA_API_TOKEN"))

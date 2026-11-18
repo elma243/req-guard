@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -22,6 +23,18 @@ def _unique_names(modules: list[ProjectModule]) -> list[ProjectModule]:
 ModuleList = Annotated[list[ProjectModule], Field(max_length=50), AfterValidator(_unique_names)]
 
 
+def _jira_key(value: str) -> str:
+    """A Jira project key like DEV or WEB2, upper case; "" clears the setting."""
+    value = value.strip().upper()
+    if value and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,29}", value):
+        raise ValueError("Jira project key looks like DEV or WEB2 (letters, digits, underscore)")
+    return value
+
+
+JiraKey = Annotated[str, AfterValidator(_jira_key)]
+JiraIssueType = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
+
+
 class ProjectCreate(BaseModel):
     name: ProjectName
     description: LongText = ""
@@ -40,6 +53,9 @@ class ProjectUpdate(BaseModel):
     auto_extract: bool | None = None
     # Language of voice notes for transcription: auto-detect, Bangla or English
     voice_language: Literal["auto", "bn", "en"] | None = None
+    # Where "Push to Jira" creates issues for tasks (Step 9); "" clears it
+    jira_task_project_key: JiraKey | None = None
+    jira_task_issue_type: JiraIssueType | None = None
 
 
 class ProjectOut(BaseModel):
@@ -52,6 +68,8 @@ class ProjectOut(BaseModel):
     modules: list[ProjectModule]
     auto_extract: bool = False
     voice_language: str = "auto"
+    jira_task_project_key: str | None = None
+    jira_task_issue_type: str = "Task"
     owner_id: int
     created_at: datetime
     updated_at: datetime

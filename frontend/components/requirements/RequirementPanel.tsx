@@ -4,6 +4,7 @@ import { ErrorBanner, secondaryButton } from "@/components/ui";
 import { VoicePlayer } from "@/components/VoiceNote";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import Clarifications from "./Clarifications";
+import TaskSummary from "./TaskSummary";
 import TestCasesSummary from "./TestCasesSummary";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
@@ -166,6 +167,14 @@ export default function RequirementPanel({
             />
           ) : (
             <Loading detail={detail} what="test cases" onRetry={onRetry} />
+          )}
+        </Section>
+
+        <Section title="Task">
+          {detail?.data ? (
+            <TaskSummary detail={detail.data} />
+          ) : (
+            <Loading detail={detail} what="the task" onRetry={onRetry} />
           )}
         </Section>
 

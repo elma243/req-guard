@@ -32,6 +32,8 @@ def get_project(project: OwnedProject) -> Project:
 @router.patch("/{project_id}", response_model=ProjectOut)
 def update_project(body: ProjectUpdate, project: OwnedProject, db: DbSession) -> Project:
     for field, value in body.model_dump(exclude_unset=True, exclude_none=True).items():
+        if field == "jira_task_project_key" and value == "":
+            value = None
         setattr(project, field, value)
     db.commit()
     db.refresh(project)

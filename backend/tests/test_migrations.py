@@ -139,6 +139,39 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert on_delete("test_case_versions", "test_cases") == "CASCADE"
     assert on_delete("test_case_versions", "acceptance_criteria") == "SET NULL"
 
+    # Step 9: task groups and tasks
+    assert {"task_groups", "tasks"} <= set(inspect(engine).get_table_names())
+    assert {"task_counter", "jira_task_project_key", "jira_task_issue_type"} <= {
+        c["name"] for c in inspect(engine).get_columns("projects")
+    }
+    assert {c["name"] for c in inspect(engine).get_check_constraints("tasks")} == {
+        "ck_tasks_status",
+        "ck_tasks_group_origin",
+        "ck_tasks_suggestion_status",
+    }
+    assert {c["name"] for c in inspect(engine).get_check_constraints("task_groups")} == {
+        "ck_task_groups_kind",
+        "ck_task_groups_origin",
+        "ck_task_groups_status",
+    }
+    assert ["requirement_id"] in [u["column_names"] for u in inspect(engine).get_unique_constraints("tasks")]
+    assert on_delete("task_groups", "projects") == "CASCADE"
+    assert on_delete("tasks", "task_groups") == "CASCADE"
+    assert on_delete("tasks", "requirements") == "CASCADE"
+    member_fks = {
+        fk["constrained_columns"][0]: fk["options"].get("ondelete")
+        for fk in inspect(engine).get_foreign_keys("tasks")
+        if fk["referred_table"] == "team_members"
+    }
+    assert member_fks == {
+        "assignee_id": "SET NULL",
+        "suggested_assignee_id": "SET NULL",
+        "alternative_assignee_id": "SET NULL",
+    }
+
+    command.downgrade(config, "f0a1b2c3d4e5")
+    assert not {"task_groups", "tasks"} & set(inspect(engine).get_table_names())
+    assert "task_counter" not in {c["name"] for c in inspect(engine).get_columns("projects")}
     command.downgrade(config, "e9f0a1b2c3d4")
     assert not test_tables & set(inspect(engine).get_table_names())
     assert "test_case_counter" not in {c["name"] for c in inspect(engine).get_columns("requirements")}

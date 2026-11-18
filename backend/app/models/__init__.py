@@ -14,6 +14,7 @@ from app.models.pair_verdict import PairVerdict
 from app.models.project import Project
 from app.models.requirement import Requirement, RequirementSource, RequirementVersion
 from app.models.source import Source
+from app.models.task import Task, TaskGroup
 from app.models.team_member import TEAM_ROLES, TeamMember
 from app.models.test_case import AcceptanceCriterion, AcceptanceCriterionVersion, TestCase, TestCaseVersion
 from app.models.user import User
@@ -39,6 +40,8 @@ __all__ = [
     "RequirementVersion",
     "Source",
     "TEAM_ROLES",
+    "Task",
+    "TaskGroup",
     "TeamMember",
     "TestCase",
     "TestCaseVersion",

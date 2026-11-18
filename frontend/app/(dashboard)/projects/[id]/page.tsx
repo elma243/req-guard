@@ -21,6 +21,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [form, setForm] = useState<ProjectInput>({ name: "", description: "", scope_text: "" });
   const [modules, setModules] = useState<ProjectModule[]>([]);
+  const [jira, setJira] = useState({ key: "", issueType: "Task" });
   const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -33,6 +34,7 @@ export default function ProjectDetailPage() {
         setSelectedProject(p.id); // opening a project also makes it the sidebar selection
         setForm({ name: p.name, description: p.description, scope_text: p.scope_text });
         setModules(p.modules);
+        setJira({ key: p.jira_task_project_key ?? "", issueType: p.jira_task_issue_type });
       })
       .catch((err) => setLoadError(errorText(err)));
   }, [id]);
@@ -53,9 +55,16 @@ export default function ProjectDetailPage() {
     setError("");
     setSaved(false);
     try {
-      const p = await updateProject(id, { ...form, name: form.name.trim(), modules: filled });
+      const p = await updateProject(id, {
+        ...form,
+        name: form.name.trim(),
+        modules: filled,
+        jira_task_project_key: jira.key.trim(),
+        jira_task_issue_type: jira.issueType.trim() || "Task",
+      });
       setProject(p);
       setModules(p.modules);
+      setJira({ key: p.jira_task_project_key ?? "", issueType: p.jira_task_issue_type });
       setSaved(true);
     } catch (err) {
       setError(errorText(err));
@@ -132,6 +141,37 @@ export default function ProjectDetailPage() {
           />
         </div>
         <ModulesEditor modules={modules} onChange={setModules} />
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium text-zinc-300">Jira project for tasks</legend>
+          <p className="text-xs text-zinc-500">
+            &quot;Push to Jira&quot; on the Tasks page creates issues here. It can be a different Jira project from the
+            one client messages are imported from. Leave the key empty to turn it off.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="jira-key">Project key</Label>
+              <input
+                id="jira-key"
+                value={jira.key}
+                onChange={(e) => setJira({ ...jira, key: e.target.value.toUpperCase() })}
+                placeholder="DEV"
+                maxLength={30}
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <Label htmlFor="jira-type">Issue type</Label>
+              <input
+                id="jira-type"
+                value={jira.issueType}
+                onChange={(e) => setJira({ ...jira, issueType: e.target.value })}
+                placeholder="Task"
+                maxLength={50}
+                className={inputClass}
+              />
+            </div>
+          </div>
+        </fieldset>
         <ErrorBanner message={error} />
         {saved &&<p className="text-sm text-emerald-300">Saved.</p>}
         <div className="flex justify-between gap-3">

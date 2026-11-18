@@ -30,6 +30,11 @@ class Project(Base):
     unseen_auto_messages: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Sent to Whisper as the language of voice notes ("auto" sends none and lets the model detect it)
     voice_language: Mapped[str] = mapped_column(String(10), default="auto", server_default="auto")
+    # Last T-number handed out (Step 9); only grows, so task codes are never reused
+    task_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Where "Push to Jira" creates issues for tasks; apart from any Jira source the client messages come from
+    jira_task_project_key: Mapped[str | None] = mapped_column(String(30))
+    jira_task_issue_type: Mapped[str] = mapped_column(String(50), default="Task", server_default="Task")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

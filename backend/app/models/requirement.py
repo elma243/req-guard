@@ -124,6 +124,10 @@ class Requirement(Base):
         passive_deletes=True,
         order_by="TestCase.number",
     )
+    # Step 9: the task made for it once it was approved and grouped
+    task: Mapped["Task | None"] = relationship(  # noqa: F821
+        back_populates="requirement", uselist=False, cascade="all", passive_deletes=True
+    )
 
     @property
     def current(self) -> "RequirementVersion":

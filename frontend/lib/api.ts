@@ -130,6 +130,8 @@ export type Project = {
   modules: ProjectModule[];
   auto_extract: boolean; // extract requirements from auto-synced messages right after the sync
   voice_language: VoiceLanguage; // language of voice notes for transcription
+  jira_task_project_key: string | null; // where "Push to Jira" creates issues for tasks
+  jira_task_issue_type: string; // e.g. "Task"
   owner_id: number;
   created_at: string;
   updated_at: string;
@@ -160,7 +162,10 @@ export function getProject(id: number | string) {
 
 export function updateProject(
   id: number | string,
-  data: Partial<ProjectInput> & Pick<Partial<Project>, "modules" | "auto_extract" | "voice_language">,
+  data: Partial<ProjectInput> &
+    Pick<Partial<Project>, "modules" | "auto_extract" | "voice_language" | "jira_task_issue_type"> & {
+      jira_task_project_key?: string; // "" clears it
+    },
 ) {
   return apiFetch<Project>(`/projects/${id}`, { method: "PATCH", body: json(data) });
 }
@@ -478,6 +483,7 @@ export type Requirement = {
   test_case_count: number; // test cases not rejected
   accepted_test_cases: number; // accepted or edited by a person
   test_cases_need_review: number; // written for an older version of the requirement
+  task: RequirementTask | null; // Step 9: its task, once it was approved and grouped
 };
 
 export type RequirementDetail = Omit<Requirement, "sources"> & {
@@ -971,6 +977,177 @@ export function reviewCriterion(projectId: number | string, criterionId: number,
 // A plain link: the browser downloads the file through the same-origin backend route
 export function testCaseExportUrl(projectId: number | string, format: "csv" | "pdf") {
   return `/api/backend/projects/${projectId}/test-cases/export.${format}`;
+}
+
+// ---------- Tasks (Step 9) ----------
+
+export const TASK_STATUSES = ["suggested", "assigned", "in_progress", "done"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  suggested: "Not assigned",
+  assigned: "Assigned",
+  in_progress: "In progress",
+  done: "Done",
+};
+
+export type RequirementTask = {
+  id: number;
+  code: string; // T-001
+  status: TaskStatus;
+  assignee_name: string | null;
+  needs_review: boolean;
+};
+
+export type MemberRef = { id: number; name: string };
+
+export type TaskSuggestion = {
+  member: MemberRef | null;
+  alternative: MemberRef | null; // the second best
+  reason: string; // e.g. "Python, FastAPI skills; 2 open tasks"
+  score: number | null;
+  status: "suggested" | "accepted" | "changed" | "rejected";
+};
+
+export type Task = {
+  id: number;
+  code: string;
+  group_id: number;
+  status: TaskStatus;
+  requirement: {
+    id: number;
+    code: string;
+    statement: string;
+    version: number;
+    approved: boolean;
+    module_name: string | null;
+  };
+  test_cases: { total: number; accepted: number; codes: string[] };
+  grouping_reason: string;
+  group_origin: "ai" | "user"; // "user" after the lead moved it
+  assignee: MemberRef | null; // set only by the lead
+  suggestion: TaskSuggestion | null;
+  needs_review: boolean;
+  needs_review_reason: string | null;
+  requirement_version: number;
+  jira_issue_key: string | null;
+  jira_url: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaskGroup = {
+  id: number;
+  name: string;
+  kind: "module" | "cluster" | "unmatched";
+  module_name: string | null;
+  reason: string;
+  origin: "ai" | "user";
+  status: "suggested" | "accepted" | "edited";
+  ai_model: string | null; // "rule-based" when named from the most frequent words
+  tasks: Task[];
+};
+
+export type MemberWorkload = {
+  member: { id: number; name: string; role: Role; skills: string[] };
+  assigned: number;
+  in_progress: number;
+  done: number;
+  pending_suggestions: number;
+};
+
+export type TaskBoard = {
+  groups: TaskGroup[];
+  workload: MemberWorkload[];
+  modules: string[];
+  total_tasks: number;
+  jira: { configured: boolean; project_key: string | null; issue_type: string; missing_env: string[] };
+};
+
+export type TaskFilters = { member_id?: string; status?: TaskStatus | ""; module?: string; needs_review?: boolean };
+
+export type GroupResult = {
+  created_tasks: number;
+  created_groups: number;
+  suggested: number;
+  items: { task_code: string; requirement_code: string; group_name: string; reason: string }[];
+  notices: string[];
+};
+
+export type JiraPushResult = {
+  pushed: { task_id: number; code: string; key: string }[];
+  skipped: { task_id: number; code: string; reason: string }[];
+  error: string | null;
+};
+
+export function listTasks(projectId: number | string, filters: TaskFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.member_id) params.set("member_id", filters.member_id);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.module) params.set("module", filters.module);
+  if (filters.needs_review) params.set("needs_review", "true");
+  const query = params.toString();
+  return apiFetch<TaskBoard>(`/projects/${projectId}/tasks${query ? `?${query}` : ""}`);
+}
+
+export function groupRequirements(projectId: number | string) {
+  return apiFetch<GroupResult>(`/projects/${projectId}/tasks/group`, { method: "POST" });
+}
+
+export function suggestAssignees(projectId: number | string) {
+  return apiFetch<{ suggested: number; notices: string[] }>(`/projects/${projectId}/tasks/suggest`, { method: "POST" });
+}
+
+export function acceptAllSuggestions(projectId: number | string) {
+  return apiFetch<{ accepted: number; skipped_needs_review: number }>(
+    `/projects/${projectId}/tasks/accept-suggestions`,
+    { method: "POST" },
+  );
+}
+
+export function acceptSuggestion(projectId: number | string, taskId: number) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}/suggestion/accept`, { method: "POST" });
+}
+
+export function rejectSuggestion(projectId: number | string, taskId: number) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}/suggestion/reject`, { method: "POST" });
+}
+
+export function suggestAgain(projectId: number | string, taskId: number) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}/suggest`, { method: "POST" });
+}
+
+export function assignTask(projectId: number | string, taskId: number, memberId: number) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}/assign`, {
+    method: "POST",
+    body: json({ member_id: memberId }),
+  });
+}
+
+export function updateTask(projectId: number | string, taskId: number, data: { status?: TaskStatus; group_id?: number }) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}`, { method: "PATCH", body: json(data) });
+}
+
+export function markTaskReviewed(projectId: number | string, taskId: number) {
+  return apiFetch<Task>(`/projects/${projectId}/tasks/${taskId}/reviewed`, { method: "POST" });
+}
+
+export function renameTaskGroup(projectId: number | string, groupId: number, name: string) {
+  return apiFetch<TaskGroup>(`/projects/${projectId}/task-groups/${groupId}`, {
+    method: "PATCH",
+    body: json({ name }),
+  });
+}
+
+// Creates Jira issues: only ever called from the push dialog's button
+export function pushTasksToJira(projectId: number | string, taskIds: number[]) {
+  return apiFetch<JiraPushResult>(`/projects/${projectId}/tasks/jira-push`, {
+    method: "POST",
+    body: json({ task_ids: taskIds }),
+  });
+}
+
+export function taskExportUrl(projectId: number | string) {
+  return `/api/backend/projects/${projectId}/tasks/export.csv`;
 }
 
 // ---------- The client's clarification page (no login) ----------

@@ -46,6 +46,10 @@ class FakeLLM(LLMClient):
         # Raised on every call, or only on the n-th call (1-based)
         self.test_cases_fail: Exception | None = None
         self.test_cases_fail_on: int | None = None
+        # Group names (Step 9): ref ("G1"...) -> {"name", "reason"}; other refs get "Fake Group <n>"
+        self.group_names: dict[str, dict] = {}
+        self.group_name_calls: list[list[dict]] = []
+        self.group_names_fail: Exception | None = None
 
     def relate(self, older: str, newer: str, relation: str) -> None:
         self.relations[(older, newer)] = relation
@@ -93,7 +97,20 @@ class FakeLLM(LLMClient):
         statement = variables["requirement"]["statement"]
         return schema.model_validate(self.test_case_answers.get(statement, default_test_cases(run)))
 
+    def _group_names(self, variables, schema):
+        self.group_name_calls.append(variables["clusters"])
+        if self.group_names_fail:
+            raise self.group_names_fail
+        self.last_model = self.model
+        groups = [
+            {"ref": c["ref"], **self.group_names.get(c["ref"], {"name": f"Fake Group {i + 1}", "reason": "Fake reason."})}
+            for i, c in enumerate(variables["clusters"])
+        ]
+        return schema.model_validate({"groups": groups})
+
     def complete_json(self, prompt_name, variables, schema, **options):
+        if prompt_name == "group_names":
+            return self._group_names(variables, schema)
         if prompt_name == "classify_pairs":
             return self._classify_pairs(variables, schema)
         if prompt_name == "clarification_questions":

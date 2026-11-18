@@ -298,3 +298,105 @@ class JiraConnector(ApiConnector):
                     )
                 )
         return sorted(messages, key=lambda m: m.sent_at)
+
+
+# ---------------------------------------------------------------------------
+# Creating issues (Step 9: "Push to Jira" for tasks; only ever on the user's click)
+# ---------------------------------------------------------------------------
+
+MAX_SUMMARY_CHARS = 255
+
+
+def _paragraph(text: str) -> dict:
+    return {"type": "paragraph", "content": [{"type": "text", "text": text}]} if text else {"type": "paragraph"}
+
+
+def to_adf(sections: list[tuple[str, list[str]]]) -> dict:
+    """An ADF document: each section is a bold heading line followed by a bullet list (or a paragraph)."""
+    content: list[dict] = []
+    for heading, lines in sections:
+        if heading:
+            content.append(
+                {"type": "paragraph", "content": [{"type": "text", "text": heading, "marks": [{"type": "strong"}]}]}
+            )
+        lines = [line for line in lines if line]
+        if len(lines) == 1:
+            content.append(_paragraph(lines[0]))
+        elif lines:
+            content.append(
+                {
+                    "type": "bulletList",
+                    "content": [{"type": "listItem", "content": [_paragraph(line)]} for line in lines],
+                }
+            )
+    return {"type": "doc", "version": 1, "content": content}
+
+
+def summary_text(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= MAX_SUMMARY_CHARS else text[: MAX_SUMMARY_CHARS - 1].rstrip() + "…"
+
+
+def _error_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    messages = [str(m) for m in body.get("errorMessages") or []]
+    messages += [f"{field}: {message}" for field, message in (body.get("errors") or {}).items()]
+    return "; ".join(messages)[:300]
+
+
+class JiraIssueCreator:
+    """Creates issues with POST /rest/api/3/issue, using the same credentials as the connector."""
+
+    def __init__(self, *, base_url: str, email: str, api_token: str, client: httpx.Client | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.auth = httpx.BasicAuth(email, api_token)
+        self._own_client = client is None
+        self.client = client or httpx.Client(timeout=30.0)
+
+    def close(self) -> None:
+        if self._own_client:
+            self.client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def issue_url(self, key: str) -> str:
+        return f"{self.base_url}/browse/{key}"
+
+    def create(self, *, project_key: str, issue_type: str, summary: str, description: dict) -> str:
+        """The new issue's key (e.g. DEV-12). Raises ConnectorError with Jira's reason."""
+        body = {
+            "fields": {
+                "project": {"key": project_key},
+                "issuetype": {"name": issue_type},
+                "summary": summary_text(summary),
+                "description": description,
+            }
+        }
+        response = send(
+            self.client,
+            "POST",
+            f"{self.base_url}/rest/api/3/issue",
+            service=SERVICE,
+            auth_hint=AUTH_HINT,
+            allow_status=(400,),
+            json=body,
+            auth=self.auth,
+            headers={"Accept": "application/json"},
+        )
+        if response.status_code == 400:
+            detail = _error_detail(response)
+            raise ConnectorError(
+                f"Jira refused the issue (HTTP 400){': ' + detail if detail else ''}. "
+                "Check the Jira project key and issue type on the project page."
+            )
+        key = json_body(response, SERVICE).get("key")
+        if not key:
+            raise ConnectorError("Jira created no issue key. Try again.")
+        return str(key)

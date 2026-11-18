@@ -1,11 +1,11 @@
 """Team member CRUD inside a project. Only the project owner can use these endpoints."""
 
 from fastapi import APIRouter, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, OwnedProject
-from app.models import Project, TeamMember
+from app.models import Project, Task, TeamMember
 from app.schemas.team import TeamMemberCreate, TeamMemberOut, TeamMemberUpdate
 
 router = APIRouter(prefix="/projects/{project_id}/team", tags=["team"])
@@ -56,6 +56,18 @@ def update_member(member_id: int, body: TeamMemberUpdate, project: OwnedProject,
 
 @router.delete("/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_member(member_id: int, project: OwnedProject, db: DbSession) -> Response:
-    db.delete(_get_member(db, project, member_id))
+    """The member's open tasks (Step 9) go back to "not assigned"; the database clears the member from tasks."""
+    member = _get_member(db, project, member_id)
+    db.execute(
+        update(Task)
+        .where(Task.assignee_id == member.id, Task.status.in_(("assigned", "in_progress")))
+        .values(status="suggested")
+    )
+    db.execute(
+        update(Task)
+        .where(Task.suggested_assignee_id == member.id, Task.suggestion_status == "suggested")
+        .values(suggestion_status=None, suggestion_reason="The suggested member was removed from the team.")
+    )
+    db.delete(member)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
