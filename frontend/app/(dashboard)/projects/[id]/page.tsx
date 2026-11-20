@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import ModulesEditor from "@/components/ModulesEditor";
+import RepoCard from "@/components/repo/RepoCard";
 import { ErrorBanner, Label, dangerButton, errorText, inputClass, primaryButton } from "@/components/ui";
 import {
   deleteProject,
@@ -183,6 +184,9 @@ export default function ProjectDetailPage() {
           </button>
         </div>
       </form>
+      <div className="mt-8">
+        <RepoCard projectId={id} />
+      </div>
     </div>
   );
 }

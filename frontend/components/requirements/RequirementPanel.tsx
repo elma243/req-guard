@@ -5,6 +5,7 @@ import { VoicePlayer } from "@/components/VoiceNote";
 import type { Requirement, RequirementDetail } from "@/lib/api";
 import Clarifications from "./Clarifications";
 import TaskSummary from "./TaskSummary";
+import TraceLinksSummary from "./TraceLinksSummary";
 import TestCasesSummary from "./TestCasesSummary";
 import { FindingList, QualitySummary } from "./ValidationFindings";
 import VersionHistory from "./VersionHistory";
@@ -175,6 +176,14 @@ export default function RequirementPanel({
             <TaskSummary detail={detail.data} />
           ) : (
             <Loading detail={detail} what="the task" onRetry={onRetry} />
+          )}
+        </Section>
+
+        <Section title="Trace links">
+          {detail?.data ? (
+            <TraceLinksSummary projectId={projectId} detail={detail.data} />
+          ) : (
+            <Loading detail={detail} what="trace links" onRetry={onRetry} />
           )}
         </Section>
 

@@ -75,7 +75,16 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
     google_redirect_uri: str = "http://localhost:8000/oauth/gmail/callback"
+    # GitHub (Step 10): optional for public repos (60 requests/hour without it, 5000 with it). Only sent to
+    # api.github.com; never returned by an endpoint.
     github_token: str | None = None
+    # Commits read per analysis, newest first (only new ones; older ones are cached)
+    github_max_commits: int = 200
+    # Largest repository download (tarball of the head commit), in MB
+    github_max_repo_mb: int = 50
+    # Embedding similarity (0-1) from which a file, test, commit or PR is suggested as a trace link (then checked
+    # by the LLM)
+    trace_similarity: float = 0.6
 
     # Fernet key that encrypts connector credentials stored in the database
     token_encryption_key: str | None = None

@@ -41,6 +41,11 @@ JSON_COLUMNS = {
     ("sources", "config"),
     ("team_members", "skills"),
     ("tasks", "rejected_member_ids"),
+    ("repositories", "last_result"),
+    ("repositories", "branches"),
+    ("repo_files", "symbols"),
+    ("repo_files", "mentions"),
+    ("repo_commits", "files"),
 }
 
 
@@ -503,3 +508,62 @@ def test_task_flow_on_postgresql(pg, client, make_user):
 
     csv_res = client.get(f"{base}/tasks/export.csv", headers=headers)
     assert csv_res.status_code == 200 and "Approval removed" in csv_res.content.decode("utf-8-sig")
+
+
+TRACE_TABLES = (
+    "repositories",
+    "repo_snapshots",
+    "repo_files",
+    "repo_commits",
+    "repo_pulls",
+    "trace_target_embeddings",
+    "trace_links",
+)
+
+
+def test_trace_tables_have_row_level_security(pg):
+    rows = pg.execute(
+        text("SELECT relname, relrowsecurity FROM pg_class WHERE relname = ANY(:names)"),
+        {"names": list(TRACE_TABLES)},
+    ).all()
+    assert dict(rows) == {name: True for name in TRACE_TABLES}
+
+
+def test_trace_flow_on_postgresql(pg, client, make_user, fake_models):
+    """Connect, analyse (fake GitHub), explicit + unchecked AI links with pgvector embeddings, confirm, CSV."""
+    import respx
+
+    from tests.case_helpers import seed_approved
+    from tests.trace_helpers import RESET, SALES, SIGN_IN, FakeGitHub, embed_by_topic
+
+    _, headers = make_user()
+    project = client.post("/projects", json={"name": "PG trace"}, headers=headers).json()
+    base = f"/projects/{project['id']}"
+    app.dependency_overrides[get_optional_llm_client] = lambda: None
+    embed_by_topic(fake_models)
+
+    def session_factory():
+        return nullcontext(pg)
+
+    owner = (headers, base, project["id"])
+    for statement in (SIGN_IN, RESET, SALES):
+        seed_approved(client, owner, session_factory, statement)
+
+    with respx.mock(assert_all_called=False) as router:
+        github = FakeGitHub(router)
+        assert client.put(f"{base}/repo", json={"repository": "acme/shop"}, headers=headers).status_code == 200
+        result = client.post(f"{base}/repo/analyze", headers=headers)
+        assert result.status_code == 200, result.text
+        assert result.json()["explicit_added"] == 8 and result.json()["unchecked"] == 4
+        again = client.post(f"{base}/repo/analyze", headers=headers).json()
+        assert again["new_commits"] == 0 and github.tarball_route.call_count == 1
+
+    rows = {r["requirement"]["code"]: r for r in client.get(f"{base}/trace", headers=headers).json()["rows"]}
+    assert rows["REQ-003"]["coverage"] == "code_only"
+    suggestion = next(link for link in rows["REQ-003"]["implements"] if link["target_key"] == "app/reports.py")
+    confirmed = client.post(f"{base}/trace/links/{suggestion['id']}/confirm", headers=headers)
+    assert confirmed.status_code == 200 and confirmed.json()["live"]
+    assert pg.scalar(text("SELECT count(*) FROM trace_target_embeddings")) > 0
+
+    csv_res = client.get(f"{base}/trace/export.csv", headers=headers)
+    assert csv_res.status_code == 200 and "app/reports.py [AI suggestion, confirmed" in csv_res.content.decode("utf-8-sig")

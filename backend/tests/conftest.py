@@ -9,6 +9,8 @@ os.environ["DATABASE_URL"] = ""
 os.environ["PROXY_SHARED_SECRET"] = ""
 # backend/.env holds real SMTP settings; tests must never send a real email
 os.environ["SMTP_HOST"] = ""
+# backend/.env may hold a real GitHub token; tests set their own fake one when they need it
+os.environ["GITHUB_TOKEN"] = ""
 # No background scheduler in tests; test_auto_sync.py drives it with a fake clock
 os.environ["AUTO_SYNC_ENABLED"] = "false"
 # No background transcription worker either; test_speech.py drives it directly. Audio is never kept by default.
@@ -164,3 +166,7 @@ def make_user(client, outbox):
         return res.json(), {"Authorization": f"Bearer {token}"}
 
     return _make
+
+
+# tests/fixtures/repo is a sample repository read by the Step 10 parser; its tests are data, not this suite's tests
+collect_ignore = ["fixtures"]

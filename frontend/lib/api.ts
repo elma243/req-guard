@@ -2,6 +2,8 @@
 // Requests go to the same-origin route /api/backend/<path>, which adds the login token
 // (kept in an httpOnly cookie) and forwards to FastAPI. See app/api/backend/[...path]/route.ts.
 
+import { messageQuery } from "./messageQuery";
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -396,11 +398,9 @@ export type MessageFilters = {
 };
 
 export function listMessages(projectId: number | string, filters: MessageFilters = {}) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value !== undefined) params.set(key, String(value));
-  }
-  return apiFetch<MessagePage>(`/projects/${projectId}/messages?${params}`);
+  // Empty filters and half-typed dates are left out (an empty date_from used to fail the whole list)
+  const query = messageQuery(filters).toString();
+  return apiFetch<MessagePage>(`/projects/${projectId}/messages${query ? `?${query}` : ""}`);
 }
 
 // Retry: queue a voice note that was not transcribed again
@@ -1148,6 +1148,207 @@ export function pushTasksToJira(projectId: number | string, taskIds: number[]) {
 
 export function taskExportUrl(projectId: number | string) {
   return `/api/backend/projects/${projectId}/tasks/export.csv`;
+}
+
+// ---------- Repository and traceability (Step 10) ----------
+
+export type AnalysisResult = {
+  head_sha: string;
+  head_changed: boolean;
+  new_commits: number;
+  commit_files_pending: number;
+  pulls_updated: number;
+  files: number;
+  python_files: number;
+  test_functions: number;
+  explicit_added: number;
+  suggested_added: number;
+  dismissed: number;
+  unchecked: number;
+  rate_limit_remaining: number | null;
+  github_requests: number;
+  notices: string[];
+};
+
+export type Repo = {
+  full_name: string;
+  owner: string;
+  name: string;
+  url: string;
+  default_branch: string;
+  private: boolean;
+  head_sha: string | null;
+  last_analyzed_at: string | null;
+  last_result: AnalysisResult | null;
+  token_configured: boolean;
+};
+
+// The GitHub token itself never reaches the browser: only whether it is set
+export type RepoState = { repo: Repo | null; token_configured: boolean };
+
+export type RepoCommit = {
+  sha: string;
+  title: string;
+  author: string;
+  committed_at: string | null;
+  files: string[];
+  files_fetched: boolean;
+  url: string;
+};
+
+export type RepoPull = { number: number; title: string; state: string; merged: boolean; author: string; head_ref: string; url: string };
+
+export type RepoSnapshot = {
+  commit_sha: string | null;
+  file_count: number;
+  python_files: number;
+  test_functions: number;
+  truncated: boolean;
+  python: { path: string; kind: "code" | "test"; tests: number; url: string; parse_error: string | null }[];
+  commits: RepoCommit[];
+  pulls: RepoPull[];
+};
+
+export const COVERAGE_LEVELS = ["not_started", "code_only", "tests_only", "code_and_tests", "verified"] as const;
+export type Coverage = (typeof COVERAGE_LEVELS)[number];
+export const COVERAGE_LABELS: Record<Coverage, string> = {
+  not_started: "Not started",
+  code_only: "Code only",
+  tests_only: "Tests only",
+  code_and_tests: "Code + tests",
+  verified: "Verified",
+};
+
+export type LinkType = "implements" | "verifies";
+export type TargetType = "file" | "commit" | "pr" | "test_file" | "test_function";
+export const TARGET_TYPE_LABELS: Record<TargetType, string> = {
+  file: "Code file",
+  commit: "Commit",
+  pr: "Pull request",
+  test_file: "Test file",
+  test_function: "Test",
+};
+
+export type TraceLink = {
+  id: number;
+  link_type: LinkType;
+  target_type: TargetType;
+  target_key: string;
+  target_label: string;
+  target_detail: string | null;
+  url: string;
+  origin: "explicit" | "ai" | "user";
+  status: "suggested" | "accepted" | "rejected";
+  confidence: number | null;
+  similarity: number | null;
+  reason: string;
+  evidence: string | null;
+  ai_model: string | null;
+  llm_checked: boolean;
+  live: boolean;
+  present: boolean;
+  test_cases: string[];
+  decided_by: string | null;
+  decided_at: string | null;
+};
+
+export type TraceRow = {
+  requirement: { id: number; code: string; statement: string; module_name: string | null };
+  coverage: Coverage;
+  coverage_reason: string;
+  criteria: { code: string; text: string; covered: boolean; test_cases: string[] }[];
+  pending: number;
+  implements: TraceLink[];
+  verifies: TraceLink[];
+};
+
+export type TraceMatrix = {
+  repo: Repo | null;
+  summary: { total: number; counts: Record<Coverage, number>; pending: number };
+  modules: string[];
+  rows: TraceRow[];
+};
+
+export type TraceFilters = { module?: string; coverage?: Coverage | ""; link_type?: LinkType | ""; pending?: boolean };
+
+export type RecoverResult = {
+  explicit_added: number;
+  suggested_added: number;
+  dismissed: number;
+  unchecked: number;
+  notices: string[];
+};
+
+export type LinkTarget = {
+  target_type: TargetType;
+  link_type: LinkType;
+  key: string;
+  label: string;
+  detail: string | null;
+  url: string;
+};
+
+export function getRepo(projectId: number | string) {
+  return apiFetch<RepoState>(`/projects/${projectId}/repo`);
+}
+
+export function connectRepo(projectId: number | string, repository: string) {
+  return apiFetch<RepoState>(`/projects/${projectId}/repo`, { method: "PUT", body: json({ repository }) });
+}
+
+export function disconnectRepo(projectId: number | string) {
+  return apiFetch<void>(`/projects/${projectId}/repo`, { method: "DELETE" });
+}
+
+export function analyzeRepo(projectId: number | string) {
+  return apiFetch<AnalysisResult>(`/projects/${projectId}/repo/analyze`, { method: "POST" });
+}
+
+export function getRepoSnapshot(projectId: number | string) {
+  return apiFetch<RepoSnapshot>(`/projects/${projectId}/repo/snapshot`);
+}
+
+export function getTrace(projectId: number | string, filters: TraceFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.module) params.set("module", filters.module);
+  if (filters.coverage) params.set("coverage", filters.coverage);
+  if (filters.link_type) params.set("link_type", filters.link_type);
+  if (filters.pending) params.set("pending", "true");
+  const query = params.toString();
+  return apiFetch<TraceMatrix>(`/projects/${projectId}/trace${query ? `?${query}` : ""}`);
+}
+
+export function recoverLinks(projectId: number | string) {
+  return apiFetch<RecoverResult>(`/projects/${projectId}/trace/recover`, { method: "POST" });
+}
+
+export function confirmLink(projectId: number | string, linkId: number) {
+  return apiFetch<TraceLink>(`/projects/${projectId}/trace/links/${linkId}/confirm`, { method: "POST" });
+}
+
+export function rejectLink(projectId: number | string, linkId: number) {
+  return apiFetch<TraceLink>(`/projects/${projectId}/trace/links/${linkId}/reject`, { method: "POST" });
+}
+
+export function addLink(projectId: number | string, requirementId: number, targetType: TargetType, targetKey: string) {
+  return apiFetch<TraceLink>(`/projects/${projectId}/trace/links`, {
+    method: "POST",
+    body: json({ requirement_id: requirementId, target_type: targetType, target_key: targetKey }),
+  });
+}
+
+export function searchTargets(projectId: number | string, q: string, targetType?: TargetType) {
+  const params = new URLSearchParams({ q });
+  if (targetType) params.set("target_type", targetType);
+  return apiFetch<LinkTarget[]>(`/projects/${projectId}/trace/targets?${params}`);
+}
+
+export function getRequirementTrace(projectId: number | string, requirementId: number) {
+  return apiFetch<TraceRow>(`/projects/${projectId}/trace/requirements/${requirementId}`);
+}
+
+export function traceExportUrl(projectId: number | string) {
+  return `/api/backend/projects/${projectId}/trace/export.csv`;
 }
 
 // ---------- The client's clarification page (no login) ----------

@@ -194,6 +194,31 @@ def test_date_range_is_inclusive(client, loaded):
     assert get(client, *loaded, date_from="2026-01-01")["total"] == 4
 
 
+def test_empty_filters_list_all_messages(client, loaded):
+    # Regression: the Messages page sent every filter key, empty ones as "", and date_from="" was a 422,
+    # so already imported messages never showed
+    body = get(client, *loaded, source="", author="", q="", date_from="", date_to="", page=1, page_size=50)
+    assert body["total"] == 14
+
+
+@pytest.mark.parametrize("value", ["", "  ", "0002-", "2024-13-45", "2024-02-30", "dd-mm-yyyy", "not a date"])
+def test_empty_or_invalid_date_is_no_filter(client, loaded, value):
+    # Regression: a half-typed date box must not fail the whole list
+    assert get(client, *loaded, date_from=value)["total"] == 14
+    assert get(client, *loaded, date_to=value)["total"] == 14
+
+
+def test_valid_date_still_filters_next_to_an_invalid_one(client, loaded):
+    assert get(client, *loaded, date_from="2026-01-01", date_to="2024-")["total"] == 4
+    only_to = get(client, *loaded, date_to="2024-03-13")["total"]
+    assert 0 < only_to < 14
+    assert get(client, *loaded, date_from="", date_to="2024-03-13")["total"] == only_to
+
+
+def test_last_possible_date_does_not_overflow(client, loaded):
+    assert get(client, *loaded, date_to="9999-12-31")["total"] == 14
+
+
 def test_filters_combine(client, loaded):
     body = get(client, *loaded, source="whatsapp", author="rahim", q="delivery")
     assert body["total"] == 1

@@ -169,6 +169,43 @@ def test_upgrade_and_downgrade(tmp_path, monkeypatch):
         "alternative_assignee_id": "SET NULL",
     }
 
+    # Step 10: repository analysis and trace links
+    repo_tables = {
+        "repositories",
+        "repo_snapshots",
+        "repo_files",
+        "repo_commits",
+        "repo_pulls",
+        "trace_target_embeddings",
+        "trace_links",
+    }
+    assert repo_tables <= set(inspect(engine).get_table_names())
+    assert {c["name"] for c in inspect(engine).get_check_constraints("trace_links")} == {
+        "ck_trace_links_link_type",
+        "ck_trace_links_target_type",
+        "ck_trace_links_origin",
+        "ck_trace_links_status",
+    }
+    assert {c["name"] for c in inspect(engine).get_check_constraints("repo_files")} == {"ck_repo_files_kind"}
+    uniques = lambda table: [u["column_names"] for u in inspect(engine).get_unique_constraints(table)]  # noqa: E731
+    assert ["project_id"] in uniques("repositories")
+    assert ["requirement_id", "target_type", "target_key"] in uniques("trace_links")
+    assert ["repository_id", "sha"] in uniques("repo_commits")
+    assert ["repository_id", "number"] in uniques("repo_pulls")
+    assert ["repository_id", "commit_sha"] in uniques("repo_snapshots")
+    assert ["repository_id", "text_hash", "model"] in uniques("trace_target_embeddings")
+    assert on_delete("repositories", "projects") == "CASCADE"
+    assert on_delete("repo_snapshots", "repositories") == "CASCADE"
+    assert on_delete("repo_files", "repo_snapshots") == "CASCADE"
+    assert on_delete("repo_commits", "repositories") == "CASCADE"
+    assert on_delete("repo_pulls", "repositories") == "CASCADE"
+    assert on_delete("trace_target_embeddings", "repositories") == "CASCADE"
+    assert on_delete("trace_links", "repositories") == "CASCADE"
+    assert on_delete("trace_links", "requirements") == "CASCADE"
+    assert on_delete("trace_links", "users") == "SET NULL"
+
+    command.downgrade(config, "a1b2c3d4e5f6")
+    assert not repo_tables & set(inspect(engine).get_table_names())
     command.downgrade(config, "f0a1b2c3d4e5")
     assert not {"task_groups", "tasks"} & set(inspect(engine).get_table_names())
     assert "task_counter" not in {c["name"] for c in inspect(engine).get_columns("projects")}

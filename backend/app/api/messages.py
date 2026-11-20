@@ -35,6 +35,17 @@ def _day_start(day: date) -> datetime:
     return datetime.combine(day, time.min, tzinfo=timezone.utc)
 
 
+def _filter_day(value: str | None) -> date | None:
+    """A date filter (YYYY-MM-DD). Empty or not a real date means no filter: a half-typed date box in the browser
+    must not make the whole message list fail."""
+    if not value or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
 def message_out(message: Message, has_audio: bool) -> MessageOut:
     out = MessageOut.model_validate(message)
     if message.kind != KIND_VOICE:
@@ -80,8 +91,8 @@ def list_messages(
     db: DbSession,
     source: Annotated[str | None, Query(max_length=30)] = None,
     author: Annotated[str | None, Query(max_length=200)] = None,
-    date_from: date | None = None,
-    date_to: date | None = None,
+    date_from: Annotated[str | None, Query(max_length=30, description="YYYY-MM-DD; empty or invalid = no filter")] = None,
+    date_to: Annotated[str | None, Query(max_length=30, description="YYYY-MM-DD, inclusive; empty or invalid = no filter")] = None,
     q: Annotated[str | None, Query(max_length=200, description="Text search")] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -93,10 +104,11 @@ def list_messages(
         conditions.append(Message.author.ilike(_contains(author.strip()), escape="\\"))
     if q and q.strip():
         conditions.append(Message.text.ilike(_contains(q.strip()), escape="\\"))
-    if date_from:
-        conditions.append(Message.sent_at >= _day_start(date_from))
-    if date_to:  # inclusive: the whole of that day
-        conditions.append(Message.sent_at < _day_start(date_to + timedelta(days=1)))
+    day_from, day_to = _filter_day(date_from), _filter_day(date_to)
+    if day_from:
+        conditions.append(Message.sent_at >= _day_start(day_from))
+    if day_to and day_to < date.max:  # inclusive: the whole of that day (9999-12-31 already includes everything)
+        conditions.append(Message.sent_at < _day_start(day_to + timedelta(days=1)))
 
     total = db.scalar(select(func.count()).select_from(Message).where(*conditions)) or 0
     rows = db.scalars(

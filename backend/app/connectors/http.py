@@ -163,9 +163,12 @@ def download(
     service: str,
     auth_hint: str = "",
     max_bytes: int = MAX_AUDIO_BYTES,
+    what: str = "audio file",
     **kwargs: Any,
 ) -> bytes:
     """Download a file, streamed and cut off at `max_bytes` (AudioTooLargeError). Retries on 429 like send().
+
+    `what` names the file in error messages ("audio file", "repository archive").
 
     A web page (text/html) instead of the file raises NotAudioError: services answer with a sign-in page when the
     token may not read files. The URL is never put in an error message.
@@ -183,16 +186,16 @@ def download(
                     continue
                 check_status(response, service, auth_hint)
                 if response.headers.get("content-type", "").lower().startswith("text/html"):
-                    raise NotAudioError(f"{service} returned a web page instead of the audio file.")
+                    raise NotAudioError(f"{service} returned a web page instead of the {what}.")
                 length = response.headers.get("content-length")
                 if length and length.isdigit() and int(length) > max_bytes:
-                    raise AudioTooLargeError(f"The audio file is larger than {max_bytes // (1024 * 1024)} MB.")
+                    raise AudioTooLargeError(f"The {what} is larger than {max_bytes // (1024 * 1024)} MB.")
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in response.iter_bytes():
                     total += len(chunk)
                     if total > max_bytes:
-                        raise AudioTooLargeError(f"The audio file is larger than {max_bytes // (1024 * 1024)} MB.")
+                        raise AudioTooLargeError(f"The {what} is larger than {max_bytes // (1024 * 1024)} MB.")
                     chunks.append(chunk)
                 return b"".join(chunks)
         except httpx.TimeoutException:

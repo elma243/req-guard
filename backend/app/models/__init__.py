@@ -12,11 +12,20 @@ from app.models.embedding import RequirementEmbedding
 from app.models.message import Message
 from app.models.pair_verdict import PairVerdict
 from app.models.project import Project
+from app.models.repository import (
+    RepoCommit,
+    RepoFile,
+    RepoPull,
+    RepoSnapshot,
+    Repository,
+    TraceTargetEmbedding,
+)
 from app.models.requirement import Requirement, RequirementSource, RequirementVersion
 from app.models.source import Source
 from app.models.task import Task, TaskGroup
 from app.models.team_member import TEAM_ROLES, TeamMember
 from app.models.test_case import AcceptanceCriterion, AcceptanceCriterionVersion, TestCase, TestCaseVersion
+from app.models.trace import TraceLink
 from app.models.user import User
 from app.models.validation import ValidationFinding
 from app.models.voice_audio import VoiceAudio
@@ -33,6 +42,11 @@ __all__ = [
     "PairVerdict",
     "PasswordResetToken",
     "Project",
+    "RepoCommit",
+    "RepoFile",
+    "RepoPull",
+    "RepoSnapshot",
+    "Repository",
     "Requirement",
     "RequirementApproval",
     "RequirementEmbedding",
@@ -45,6 +59,8 @@ __all__ = [
     "TeamMember",
     "TestCase",
     "TestCaseVersion",
+    "TraceLink",
+    "TraceTargetEmbedding",
     "User",
     "ValidationFinding",
     "VoiceAudio",

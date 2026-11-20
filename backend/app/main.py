@@ -10,7 +10,19 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.ai.speech import start_worker
-from app.api import auth, clarifications, messages, projects, requirements, sources, tasks, team, test_cases
+from app.api import (
+    auth,
+    clarifications,
+    messages,
+    projects,
+    repos,
+    requirements,
+    sources,
+    tasks,
+    team,
+    test_cases,
+    trace,
+)
 from app.connectors.scheduler import start_scheduler
 from app.core.config import settings
 from app.core.db import get_db
@@ -54,6 +66,8 @@ app.include_router(clarifications.router)
 app.include_router(clarifications.public_router)
 app.include_router(test_cases.router)
 app.include_router(tasks.router)
+app.include_router(repos.router)
+app.include_router(trace.router)
 
 
 @app.get("/health")

@@ -1,5 +1,6 @@
 """A stand-in for LLMClient: answers "extract_requirements" from a fixture table, "classify_pairs" from
-`relations`, and the clarification and test case prompts from settable answers; never calls an API."""
+`relations`, and the clarification, test case, group name and trace link prompts from settable answers; never
+calls an API."""
 
 import json
 from pathlib import Path
@@ -50,6 +51,12 @@ class FakeLLM(LLMClient):
         self.group_names: dict[str, dict] = {}
         self.group_name_calls: list[list[dict]] = []
         self.group_names_fail: Exception | None = None
+        # Trace links (Step 10): (requirement statement, item name) -> {"verdict", "confidence", "reason"}; other
+        # pairs get `default_link_verdict`
+        self.link_verdicts: dict[tuple[str, str], dict] = {}
+        self.default_link_verdict: dict = {"verdict": "link", "confidence": 0.8, "reason": "Fake: the names match."}
+        self.verify_link_calls: list[list[dict]] = []
+        self.verify_links_fail: Exception | None = None
 
     def relate(self, older: str, newer: str, relation: str) -> None:
         self.relations[(older, newer)] = relation
@@ -108,7 +115,28 @@ class FakeLLM(LLMClient):
         ]
         return schema.model_validate({"groups": groups})
 
+    def _verify_links(self, variables, schema):
+        self.verify_link_calls.append(variables["pairs"])
+        if self.verify_links_fail:
+            raise self.verify_links_fail
+        self.last_model = self.model
+        links = [
+            {
+                "pair_id": p["pair_id"],
+                **self.link_verdicts.get((p["requirement"]["statement"], p["item"]["name"]), self.default_link_verdict),
+            }
+            for p in variables["pairs"]
+        ]
+        return schema.model_validate({"links": links})
+
+    @property
+    def verified_pairs(self) -> list[tuple[str, str]]:
+        """(requirement code, item name) of every pair sent to "verify_links"."""
+        return [(p["requirement"]["code"], p["item"]["name"]) for call in self.verify_link_calls for p in call]
+
     def complete_json(self, prompt_name, variables, schema, **options):
+        if prompt_name == "verify_links":
+            return self._verify_links(variables, schema)
         if prompt_name == "group_names":
             return self._group_names(variables, schema)
         if prompt_name == "classify_pairs":
